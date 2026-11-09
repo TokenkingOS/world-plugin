@@ -1,6 +1,6 @@
 # world 接入包
 
-工程包版本：0.12.2。0.12.2 起 Claude Code 里的连接叫 `plugin:world:app`，更新后要重新登录一次；0.12.1 只改了措辞，行为不变。0.12.0 起带 `world-ask`（问事）和 `world-daily`（写日报，收集会话的脚本随包带），本人动作支持登记、撤销委托，老入口 2026-11-20 下线；0.11.2 起 Claude Code 也能后台自动整理待提炼（macOS），整理技能只记对得上目标验收条目的事；各技能写明服务忙（503 `SERVICE_BUSY`）时怎么等、怎么重放，与证据存储不可用分开；0.11.0 起有本机采集组件的“原来源 Agent 在线提炼”技能，组件安装、登录与真实运行另行验收。
+工程包版本：0.12.3。0.12.3 起 Claude Code 里的连接改回 `plugin:world:world`（桌面端连接器显示 World），从 0.12.2 更新后要重新登录一次；0.12.2 曾把 Claude Code 里的连接键改成 `app`，更新后要重新登录一次；0.12.1 只改了措辞，行为不变。0.12.0 起带 `world-ask`（问事）和 `world-daily`（写日报，收集会话的脚本随包带），本人动作支持登记、撤销委托，老入口 2026-11-20 下线；0.11.2 起 Claude Code 也能后台自动整理待提炼（macOS），整理技能只记对得上目标验收条目的事；各技能写明服务忙（503 `SERVICE_BUSY`）时怎么等、怎么重放，与证据存储不可用分开；0.11.0 起有本机采集组件的“原来源 Agent 在线提炼”技能，组件安装、登录与真实运行另行验收。
 
 本包提供远程连接、身份与能力核对、工作查询与普通事实记录，以及获准工作来源归位、对话内单项 Task 修改、本人门、创建/指派、生命周期操作和委托登记与撤销。使用既有 world 账号，问事、记事、办门不需要安装 Python、配置环境变量或维护脚本；用 `world-daily` 写日报和日终查漏要本机有 Python。
 
@@ -8,7 +8,7 @@
 
 - 支持 Agent Plugins 的宿主可加载根目录 `plugin.json` 和 `mcp.json`。
 - Codex：运行 `codex plugin marketplace add TokenkingOS/world-plugin`，再运行 `codex plugin add world@tkos-world`；包内附兼容清单。然后运行 `codex mcp login world` 登录（会打开浏览器）。也可在 MCP 连接界面添加 `https://world.tokenkingos.com/app/mcp`，选择 HTTP/Streamable HTTP，并通过 Authenticate 登录。
-- Claude Code：运行 `claude plugin install world --marketplace TokenkingOS/world-plugin`，再运行 `claude mcp login plugin:world:app` 完成 world 的 OAuth 登录（会打开浏览器），也可在 MCP 管理界面登录。
+- Claude Code：运行 `claude plugin install world --marketplace TokenkingOS/world-plugin`，再运行 `claude mcp login plugin:world:world` 完成 world 的 OAuth 登录（会打开浏览器），也可在 MCP 管理界面登录。
 - Grok 或其他兼容 Agent 可在其 MCP 连接/登录界面使用同一地址。标准连接能力开放；本包未声明 Grok 支持与 Codex/Claude 相同的插件安装格式。
 
 本人在登录页填写账号，选择公司后回到原对话，问「核对 world 的身份和可用能力，再看我负责的工作」。先确认显示的是本人及正确范围。
