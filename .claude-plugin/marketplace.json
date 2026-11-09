@@ -1,0 +1,8 @@
+{
+  "name": "tkos-world",
+  "owner": { "name": "TokenkingOS" },
+  "metadata": { "description": "TokenkingOS 成员接入 world 的插件。" },
+  "plugins": [
+    { "name": "world", "source": "./world" }
+  ]
+}

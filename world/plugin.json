@@ -1,0 +1,11 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "world",
+  "version": "0.12.1",
+  "description": "连接 world、查询和记录工作，选择获准来源归位 Task，逐项办理本人操作并跨 Agent 恢复。",
+  "extensions": {
+    "com.openai": {
+      "onboardingSkill": "./skills/world-connect/SKILL.md"
+    }
+  }
+}

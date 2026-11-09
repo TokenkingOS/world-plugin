@@ -1,0 +1,43 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${PLUGIN_ROOT}/hooks/auto-extract.sh\" codex SessionStart",
+            "commandWindows": "cmd.exe /d /c exit 0",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${PLUGIN_ROOT}/hooks/auto-extract.sh\" codex Stop",
+            "commandWindows": "cmd.exe /d /c exit 0",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${PLUGIN_ROOT}/hooks/auto-extract.sh\" codex SessionEnd",
+            "commandWindows": "cmd.exe /d /c exit 0",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

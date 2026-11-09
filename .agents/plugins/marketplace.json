@@ -1,0 +1,12 @@
+{
+  "name": "tkos-world",
+  "interface": { "displayName": "TokenkingOS world" },
+  "plugins": [
+    {
+      "name": "world",
+      "source": { "source": "local", "path": "./world" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "category": "Productivity"
+    }
+  ]
+}
