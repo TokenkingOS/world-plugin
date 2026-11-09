@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "world": {
+    "app": {
       "type": "http",
       "url": "https://world.tokenkingos.com/app/mcp"
     }
