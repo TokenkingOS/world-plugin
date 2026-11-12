@@ -1,6 +1,6 @@
 {
   "name": "world",
-  "version": "0.12.3",
+  "version": "0.12.4",
   "description": "连接 world、查询和记录工作，选择获准来源归位 Task，逐项办理本人操作并跨 Agent 恢复。",
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",
