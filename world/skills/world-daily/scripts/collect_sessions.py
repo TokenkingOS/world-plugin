@@ -8,6 +8,8 @@
 
     python collect_sessions.py                 # 今天，本地时区
     python collect_sessions.py --date 2026-10-09 --tz +08:00
+    python collect_sessions.py --select-dates  # 只选日、给出 mode（select_dates.py）
+    python collect_sessions.py --capture-check # 已切换到本机采集的人：只查本机采集的漏（capture_check.py）
 
 Codex 读 ~/.codex/sessions/<年>/<月>/<日>/*.jsonl（当天与前一天的目录，前一天开的会话可能延续到今天）
 与 ~/.codex/archived_sessions；Claude Code 读 ~/.claude/projects/*/*.jsonl。按每行的 timestamp 过滤到这一天。
@@ -253,6 +255,12 @@ def claude_session(path: Path, start: datetime, end: datetime) -> Optional[Sessi
     return session
 
 
+def session_has_work(agent: str, path: Path, start: datetime, end: datetime) -> bool:
+    """这段时间里这个会话有没有日进展自己的运行以外的请求或答复；子 Agent 与旁支不算。agent 是 claude 或 codex。"""
+    session = (codex_session if agent == "codex" else claude_session)(path, start, end)
+    return session is not None and bool(session.requests or session.answers)
+
+
 def day_window(day: date, tz: timezone) -> tuple[datetime, datetime]:
     start = datetime(day.year, day.month, day.day, tzinfo=tz)
     return start, start + timedelta(days=1)
@@ -356,6 +364,11 @@ def render(sessions: list[Session], day: date, tz: timezone, max_chars: int, max
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="汇总本机会话（默认只读、不联网）；--select-dates 只选日，可读取工作日历。")
     parser.add_argument("--select-dates", action="store_true", help="只输出日进展选日与 mode 的 JSON，不收集会话、不写文件")
+    parser.add_argument("--capture-check", action="store_true",
+                        help="只输出本机采集查漏的 JSON（已切换到本机采集的人日终用），只读本机采集状态目录")
+    parser.add_argument("--capture-home", type=Path,
+                        default=Path(os.environ.get("TKOS_CAPTURE_HOME") or Path.home() / ".tkos-world" / "capture"),
+                        help="本机采集状态目录；默认同 world-capture 的钩子（TKOS_CAPTURE_HOME，否则 ~/.tkos-world/capture）")
     parser.add_argument("--date", type=date.fromisoformat, help="哪一天，YYYY-MM-DD；默认今天")
     parser.add_argument("--tz", type=parse_offset, help="时区，例如 +08:00；默认本机时区")
     parser.add_argument("--codex-home", type=Path, default=Path.home() / ".codex")
@@ -372,15 +385,20 @@ def main(argv: Optional[list[str]] = None) -> int:
         if args.date:
             plan_args += ["--date", args.date.isoformat()]
         return selector["main"](plan_args)
-    try:
-        dirs = session_dirs(args.config)
-    except ValueError as exc:
-        print(f"collect_sessions：{exc}", file=sys.stderr)
-        return 2
     tz = args.tz or datetime.now().astimezone().tzinfo
     day = args.date or datetime.now(tz).date()
-    sessions = collect(day, tz, args.codex_home, args.claude_home)
-    text = render(sessions, day, tz, args.max_chars, args.max_messages, dirs)
+    if args.capture_check:
+        checker = runpy.run_path(str(Path(__file__).with_name("capture_check.py")))
+        result = checker["check"](args.capture_home, day, tz, datetime.now(timezone.utc),
+                                  checker["switch_selection"](args.config), session_has_work)
+        text = json.dumps(result, ensure_ascii=False, indent=2) + "\n"
+    else:
+        try:
+            dirs = session_dirs(args.config)
+        except ValueError as exc:
+            print(f"collect_sessions：{exc}", file=sys.stderr)
+            return 2
+        text = render(collect(day, tz, args.codex_home, args.claude_home), day, tz, args.max_chars, args.max_messages, dirs)
     if args.out:
         args.out.write_text(text, encoding="utf-8")
     else:

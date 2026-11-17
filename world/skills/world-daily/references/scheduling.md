@@ -5,7 +5,7 @@
 ## 先做三件事
 
 1. **装插件并登录。** 在 Codex 或 Claude Code 的插件界面装 world 插件，再在 MCP 界面登录一次 world（邮箱、密码，选公司），`world-connect` 技能带着做。`world-daily` 随插件装好，不用另放文件夹，连接也不用另配。
-2. **备好 Python。** 选日和收集会话的脚本随插件带着。写日报和只查漏都要先跑它们，所以本机要有 Python。先用 `~/.tkos-world/venv` 里的（macOS `bin/python`，Windows `Scripts\python.exe`），没有再用 `python3`（Windows `py -3`）。都没有就先装上；装好之前用 `world-record` 在对话里记。
+2. **备好 Python。** 选日和收集会话的脚本随插件带着。写日报、日终快照与查漏都要先跑它们，所以本机要有 Python。先用 `~/.tkos-world/venv` 里的（macOS `bin/python`，Windows `Scripts\python.exe`），没有再用 `python3`（Windows `py -3`）。都没有就先装上；装好之前用 `world-record` 在对话里记。
 3. **先手动跑通一次。** 在 Codex 里说 `$world-daily`，在 Claude Code 里输入 `/world:world-daily`。第一次会帮你建 `~/.tkos-world/daily.json`；看到汇报里有事件 id 和快照 id，才算通了。
 
 原来用 `tkos-world-daily` 建过定时任务的，把提示词里的技能名换成 `world-daily`，不另建一个。
@@ -33,7 +33,7 @@
 
 粘贴时 Codex 会把 `$world-daily` 弹成选 skill 的框，选上之后把后半句补全即可。建好后在 **Scheduled** 里点开这个任务核对：提示里要有 world-daily 和「定时运行」四个字，缺了它会当成本人在场、一直等确认。
 
-建好后手动跑一次。Codex 问要不要运行 world 的工具时，对六个工具（列对象、取对象、取事件、取状态、记外部事件、写状态快照）和收集会话的 Python 命令（含 `--select-dates` 选日模式）都选以后不再问的那一项（例如「Allow and don't ask me again」）。已切换到本机采集的人，再把 `world_app_sources_list`、`world_app_sources_runs`、`world_app_sources_imports` 三个来源读取工具一并放行。其余写入工具照旧先问你。
+建好后手动跑一次。Codex 问要不要运行 world 的工具时，对六个工具（列对象、取对象、取事件、取状态、记外部事件、写状态快照）和收集会话的 Python 命令（含 `--select-dates` 选日、`--capture-check` 查本机采集两种模式）都选以后不再问的那一项（例如「Allow and don't ask me again」）。已切换到本机采集的人，再把 `world_app_sources_list`、`world_app_sources_runs`、`world_app_sources_imports`、`world_app_sources_targets` 四个来源读取工具一并放行。其余写入工具照旧先问你。
 
 - 到点时电脑要开着、应用要在运行；结果在 **Scheduled** 里看。
 - 定时任务按你的默认沙箱运行。读本机会话不受影响；读飞书要联网，在沙箱里多半会失败，skill 会跳过飞书。
@@ -54,14 +54,14 @@ claude mcp remove -s user tkos-world
 - 文件夹：一个空文件夹，例如 `~/tkos-daily`
 - 时间：每个自然日，20:30
 
-建好后点 **Run now** 跑一次，出现权限提示时对 world 连接的六个工具（列对象、取对象、取事件、取状态、记外部事件、写状态快照）和收集会话的 Python 命令（含 `--select-dates` 选日模式）都选「always allow」。已切换到本机采集的人，定时运行走只查漏，还要把 `world_app_sources_list`、`world_app_sources_runs`、`world_app_sources_imports` 三个来源读取工具一并放行。以后的定时运行就不会卡在批准上。
+建好后点 **Run now** 跑一次，出现权限提示时对 world 连接的六个工具（列对象、取对象、取事件、取状态、记外部事件、写状态快照）和收集会话的 Python 命令（含 `--select-dates` 选日、`--capture-check` 查本机采集两种模式）都选「always allow」。已切换到本机采集的人，日终还要查漏，还要把 `world_app_sources_list`、`world_app_sources_runs`、`world_app_sources_imports`、`world_app_sources_targets` 四个来源读取工具一并放行。以后的定时运行就不会卡在批准上。
 
 - 到点时电脑要醒着、应用要开着。睡过了点，醒来后只补跑最近一次。
 - 也可以在任一 Claude Code 桌面会话里说「每天 20:30 触发 `/world:world-daily 定时运行`，按个人工作日历选日，文件夹用 ~/tkos-daily」让它建。
 
 ## 补跑与时间
 
-- 走哪条路只看 `daily.json` 有没有 `capture_switch`（SKILL.md 第 0 步给出 `check_only` 或 `write`），不看持续来源有没有启用。`check_only` 的人，持续来源的恢复以服务端本人确认的 `choice.history` 为范围，由组件沿原进度补全部多日缺口，不只补昨天；日终只核选择/版本、当前角色、失败与待办，不写日报。下面的按日规则只用于 `write`，不把它当成持续补传能力。
+- 走哪条路只看 `daily.json` 有没有 `capture_switch`（SKILL.md 第 0 步给出 `check_only` 或 `write`），不看持续来源有没有启用。`check_only` 的人，会话里的进展由本机采集按本人确认的 `choice.history` 补送（后台轮失败时条目留在本机队列，下一轮接着送），不只补昨天；日终只处理 `date` 这一天：查漏，记飞书、`extra_sources` 和会上的结论，按当天进 world 的事件写快照，不补写上一个工作日。下面的按日规则只用于 `write`；`check_only` 要补某一天，照样点名补写。
 - 每次按 SKILL.md 第 0 步读选日结果：普通运行只在本人的工作日写入，先检查 `previous_workday` 是否漏写，再写今天。中国长假可能要回看超过三个自然日，调休周末也算工作日；个人 `weekdays` 例外忽略中国假期。中午 12:00 前运行、要补上一个工作日时，这次不写今天，留给晚上的运行或明天的补写。只补这一个工作日；连着漏了几天的，更早的按下一条补写。
 - 想补写某一天，直接说「补写 10 月 8 日的进展」：选日期和收集会话都加 `--date 2026-10-08`，该日期不受假日或周末过滤；事件与快照保留来源已核的事实时刻，时间未知时待核，不取补跑时刻或固定钟点。
 - 20:30 之后做的事，当天那次运行收不到，第二天的运行也只收第二天的会话。想写全，睡前手动说一次「写今天的进展」，skill 会以「补充」再写一组。
@@ -77,4 +77,4 @@ claude mcp remove -s user tkos-world
 
 ## 变化与日终查漏
 
-`daily.json` 有 `capture_switch`（第 0 步给出 `check_only`）的人，日终只做下面这件事，不写日报；没有的照常写日进展，不因为启用了采集组件而改变。已启用并获准的产品采集组件在来源变化时调用归位，日终检查覆盖、未执行增量、失败和待本人事项。用原来源版本、import、工作项及幂等键恢复；不把日终汇总再次全量写入经营事件。`world_app_sources_runs` 返回当时观察与最后完整检查，业务结果另核 `world_app_sources_result`；电脑离线和未覆盖来源保持未知。完整检查无增量只留运行回执，未接通该入口时明确未同步，不补造“今日无新增”事件。本文的旧客户端定时配置保留为主动日进展兼容入口，不代表托管组件已经安装或后台持续运行。
+`daily.json` 有 `capture_switch`（第 0 步给出 `check_only`）的人，会话里的进展由本机采集逐条记进 world，日终不再从会话提事件：飞书、`extra_sources` 和当天会上的结论照旧记成日进展事件，再按当天进 world 的事件写快照；快照的素材含本机采集所选、属于这个目标的 Task 上的事件（`world_app_sources_targets`）；查漏查本机采集（`--capture-check`：后台轮的失败与对不上 world 的导入、Codex 和 Claude Code 的采集钩子没在跑、这台机器为什么不采集）和 world 里每项选择的覆盖、失败与待本人项（`world_app_sources_list`、`world_app_sources_runs`、`world_app_sources_imports`）。没有的照常写日进展（`write`），不因为装了采集而改变。没有真实新增不记事件、不写快照，不补造「今日无新增」。
