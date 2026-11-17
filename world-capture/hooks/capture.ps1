@@ -1032,6 +1032,21 @@ function Get-ReportPrompt([string]$prompts, $reportArgs) {
 
 # ---------- 两种 CLI 的输出 ----------
 
+# claude 的 tool_use_result：MCP 工具是对象（content 为完整文字，另带 _meta、structuredContent；本人机器 11/17 实测），也可能是内容块数组。
+# structuredContent 是 world 交回的那份 JSON 本身，优先用它：content 里可能在正文后面拼了服务端提示，就不再是一个 JSON。
+# 返回数组时前面加逗号，免得 PowerShell 把只有一块的内容块数组拆成单个字典。
+function Get-FullContent($full) {
+  if ($full -is [System.Collections.IDictionary]) {
+    $structured = Get-Field $full 'structuredContent'
+    if ($structured -is [System.Collections.IDictionary]) { return (ConvertTo-JsJson $structured) }
+    $c = Get-Field $full 'content'
+    if ($null -eq $c) { return $null }
+    return , $c
+  }
+  if ($null -eq $full) { return $null }
+  return , $full
+}
+
 function Get-FirstText($content) {
   if ($content -is [string]) { return $content }
   if ($content -is [System.Collections.IList]) {
@@ -1076,7 +1091,8 @@ function Read-ClaudeStream($rows) {
         if ((Test-Is $type 'assistant') -and (Test-Is (Get-Field $block 'type') 'tool_use')) { $uses.Add($block) }
         if ((Test-Is $type 'user') -and (Test-Is (Get-Field $block 'type') 'tool_result')) {
           $out = @{ is_error = (Get-Field $block 'is_error'); content = (Get-Field $block 'content') }
-          if (($results.Count -eq 1) -and ($null -ne $full)) { $out.content = $full }
+          $fullContent = Get-FullContent $full
+          if (($results.Count -eq 1) -and ($null -ne $fullContent)) { $out.content = $fullContent }
           $outs[(ConvertTo-JsTemplate (Get-Field $block 'tool_use_id'))] = $out
         }
       }

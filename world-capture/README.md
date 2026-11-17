@@ -1,6 +1,6 @@
 # world-capture 插件
 
-工程包版本：0.1.0。本机采集：Claude Code、Codex 的会话每轮结束时，钩子只读这个会话新增的记录，把条目放进本机队列；攒够了在后台起一轮只带 world 工具的 Agent 判断，再经 world 插件的连接送进 world。要和 `world` 插件一起装：后台那一轮用它的连接（和它的登录），判断规则取它的 `world-source-extract` 技能。
+工程包版本：0.1.1。本机采集：Claude Code、Codex 的会话每轮结束时，钩子只读这个会话新增的记录，把条目放进本机队列；攒够了在后台起一轮只带 world 工具的 Agent 判断，再经 world 插件的连接送进 world。要和 `world` 插件一起装：后台那一轮用它的连接（和它的登录），判断规则取它的 `world-source-extract` 技能。
 
 拆成单独的插件，是因为 Codex 在插件里任何一个文件变了以后都要本人重新信任一次钩子；`world` 经常发版，采集逻辑很少变。
 

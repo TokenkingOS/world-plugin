@@ -138,13 +138,18 @@ def report_prompt($template; $args): ($template | fill({args: ($args | code_bloc
 def body: if type == "string" then (try fromjson catch null) else null end;
 def first_text: if type == "string" then . elif type == "array" then (map(select(type == "object" and .type == "text") | .text) | first) else null end;
 
+# claude 的 tool_use_result：MCP 工具是对象（content 为完整文字，另带 _meta、structuredContent；本人机器 11/17 实测），也可能是内容块数组。
+# structuredContent 是 world 交回的那份 JSON 本身，优先用它：content 里可能在正文后面拼了服务端提示，就不再是一个 JSON。
+def full_content:
+  if type == "object" then (if (.structuredContent | type) == "object" then (.structuredContent | tojson) else .content end) else . end;
+
 # claude -p --output-format stream-json --verbose 的每一行。init 里有 world 连接的状态，result 里有用量与最终答复。
 def parse_claude:
   (map(select(.type == "system" and .subtype == "init")) | first) as $init
   | (map(select(.type == "result")) | last) as $result
   # 工具返回超过约 50 KB 时，content 里只剩一句「已存到文件」，完整的返回在这一行的 tool_use_result 里（实测）。
   | ([.[] | select(.type == "user") | .tool_use_result as $full | [.message.content[]? | select(type == "object" and .type == "tool_result")]
-        | if length == 1 and $full != null then [.[0] + {content: $full}] else . end | .[]]
+        | if length == 1 and ($full | full_content) != null then [.[0] + {content: ($full | full_content)}] else . end | .[]]
       | map({(.tool_use_id | tostring): .}) | add // {}) as $outs
   | {
       events: length,
