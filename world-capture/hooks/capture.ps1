@@ -4,6 +4,7 @@
 # contract.mjs，语义按 JS 算：字符串比较一律区分大小写、按序号比，正则只用显式字符类（.NET 的 \w \s \b 认 Unicode）。
 # 文件带 UTF-8 BOM：PowerShell 5.1 读没有 BOM 的脚本时按系统 ANSI 代码页解码。代码里不写非 ASCII 字面量。
 # 另有三个子命令给「开始采集」那次对话里的 Agent 用（capture.ps1 <check|enable|import> <claude|codex> [选择记录文件]），
+# 一个给回退到组件时用（capture.ps1 export <claude|codex> [选择记录文件 读回记录文件]），
 # 规则同 setup.jq，见文件末尾那一节。
 
 if ($env:WORLD_AUTO_EXTRACT_ROUND) { exit 0 }
@@ -784,9 +785,11 @@ function Initialize-Round {
   $script:ClaudePrefix = 'mcp__plugin_world_world__'
   $script:RoundTools = @{ judge = @('world_app_sources_read', 'world_app_sources_targets');
     send = @('world_app_sources_ingest', 'world_app_sources_imports'); report = @('world_app_sources_report_run') }
-  # 一轮最多 5 批、每批 20 条；每条原文最多交 8000 字，一批合计最多 60000 字；每份骨架最多 50 条、一轮最多 5 份。
+  # 一轮最多 5 批、每批 100 条；每条原文最多交 8000 字，一批合计最多 60000 字；每份骨架最多 50 条、一轮最多 5 份。
+  # 每次调用固定带着系统提示和工具 schema，一批的原文反倒不多（本人队列中位数 113 字），所以按条数多放（原来每批 20 条）。
   # 读回导入每页 10 条：一页太大时 Claude Code 只给模型看一句「已存到文件」（约 50 KB 起，实测），模型看不到 next_cursor。
-  $script:Limits = @{ batches = 5; batch = 20; item_chars = 8000; batch_chars = 60000; increment = 50; increments = 5; readback_pages = 20; readback_page = 10; pending = 200 }
+  $script:Limits = @{ batches = 5; batch = 100; item_chars = 8000; batch_chars = 60000; increment = 50; increments = 5; readback_pages = 20; readback_page = 10; pending = 20 }
+  # 回执的积压清单只列最早的 20 条，条数照实报（要求 world 服务已允许清单只列一部分，有积压时至少一条）：原来列 200 条，模型逐条照抄太贵。
   $script:ItemFields = @('classification', 'target_ref', 'field_key', 'value', 'quote', 'occurred_at', 'links', 'source_event_ref', 'constraint')
   # 一轮的硬时限（秒）。各次调用的时限按它的比例算，锁比它再老 LockMargin 秒就当持锁的进程已不在。
   $script:RoundLimit = 1200
@@ -807,6 +810,17 @@ function Get-List($obj, [string]$key) {
   $v = Get-Field $obj $key
   if ($v -is [System.Collections.IList]) { return , $v }
   return , @()
+}
+
+# 按键数组给项数组原地排序（键按码点比）。不用 Array.Sort(keys, items, comparer)：Windows PowerShell 5.1 上它只排了键，
+# 项数组原样不动（windows-2025 实测，pwsh 7 上没这个问题）。这里给键接上下标，只排键这一个 string[]，再按下标回填。
+function Invoke-SortBy($keys, $items) {
+  $n = $items.Length
+  $tagged = New-Object string[] $n
+  for ($i = 0; $i -lt $n; $i++) { $tagged[$i] = [string]$keys[$i] + [char]0 + $i.ToString('D10', $script:Invariant) }
+  [System.Array]::Sort($tagged, [System.StringComparer]::Ordinal)
+  $copy = $items.Clone()
+  for ($i = 0; $i -lt $n; $i++) { $items[$i] = $copy[[int]$tagged[$i].Substring($tagged[$i].Length - 10)] }
 }
 
 # 时限按一轮硬时限的比例取整（同 sh 的整数除法）。
@@ -937,7 +951,7 @@ function Get-Plan([string]$queueDir, [string]$resultsDir, [string]$deliveredPath
   for ($i = 0; $i -lt $sorted.Length; $i++) {
     $keys[$i] = [string]$sorted[$i]['first_seen_at'] + [char]0 + [string]$sorted[$i]['reported_at'] + [char]0 + [string]$sorted[$i]['item_id']
   }
-  [System.Array]::Sort($keys, $sorted, [System.StringComparer]::Ordinal)
+  Invoke-SortBy $keys $sorted
   foreach ($name in $stored.Keys) { if (-not $seen.ContainsKey($name)) { $stale.Add($name) } }
   $plan = @{ backlog = $sorted.Count; pending = (New-Object System.Collections.Generic.List[object]);
     settle = (New-Object System.Collections.Generic.List[object]); judge = (New-Object System.Collections.Generic.List[object]);
@@ -1002,11 +1016,14 @@ function Get-Since($batch) {
   return $min.AddDays(-1).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", $script:Invariant)
 }
 
+# 批内每条用短编号 key（"1" 起）代替 item_id、item_version：两个都是 64 位十六进制，模型要读一遍、答的时候再抄一遍。
 function Get-JudgePrompt([string]$prompts, [string]$rules, $cfg, $batch) {
   $items = New-Object System.Collections.Generic.List[object]
+  $n = 0
   foreach ($e in $batch) {
-    $item = [ordered]@{}
-    foreach ($k in $e.Keys) { if (@('name', 'attempt') -notcontains $k) { $item[$k] = $e[$k] } }
+    $n++
+    $item = [ordered]@{ key = $n.ToString($script:Invariant) }
+    foreach ($k in $e.Keys) { if (@('name', 'attempt', 'item_id', 'item_version') -notcontains $k) { $item[$k] = $e[$k] } }
     $items.Add($item)
   }
   $data = [ordered]@{ selection_id = $cfg.selection_id; selection_version = $cfg.selection_version; since = (Get-Since $batch); items = $items }
@@ -1070,10 +1087,13 @@ function Add-Usage($total, $inTokens, $cachedTokens, $outTokens) {
 }
 
 # claude -p --output-format stream-json --verbose 的每一行。init 里有 world 连接的状态，result 里有用量与最终答复。
+# world_tools 是 init 里列的 world 工具（不带前缀），记下来，之后的调用把用不到的关掉；requests 是这次调用里模型请求的次数
+# （同一次请求的各个内容块 message.id 相同），用来核对用量花在哪。
 function Read-ClaudeStream($rows) {
   $parsed = @{ events = $rows.Count; mcp = $null; calls = (New-Object System.Collections.Generic.List[object]); final = $null;
-    errors = (New-Object System.Collections.Generic.List[string]); api_status = $null; usage = $null }
+    errors = (New-Object System.Collections.Generic.List[string]); api_status = $null; usage = $null; world_tools = $null; requests = $null }
   $outs = @{}
+  $requests = @{}
   $uses = New-Object System.Collections.Generic.List[object]
   $init = $null; $result = $null
   foreach ($r in $rows) {
@@ -1082,6 +1102,8 @@ function Read-ClaudeStream($rows) {
     if ((Test-Is $type 'system') -and (Test-Is (Get-Field $r 'subtype') 'init') -and ($null -eq $init)) { $init = $r }
     elseif (Test-Is $type 'result') { $result = $r }
     elseif ((Test-Is $type 'assistant') -or (Test-Is $type 'user')) {
+      $messageId = Get-Field (Get-Field $r 'message') 'id'
+      if ((Test-Is $type 'assistant') -and ($messageId -is [string])) { $requests[$messageId] = $true }
       $content = Get-Field (Get-Field $r 'message') 'content'
       if (-not ($content -is [System.Collections.IList])) { continue }
       # 工具返回超过约 50 KB 时，content 里只剩一句「已存到文件」，完整的返回在这一行的 tool_use_result 里（实测）。
@@ -1101,7 +1123,13 @@ function Read-ClaudeStream($rows) {
   if ($null -ne $init) {
     $parsed.mcp = 'missing'
     foreach ($server in (Get-List $init 'mcp_servers')) { if (Test-Is (Get-Field $server 'name') 'plugin:world:world') { $parsed.mcp = Get-Field $server 'status' } }
+    $seen = New-Object System.Collections.Generic.List[string]
+    foreach ($t in (Get-List $init 'tools')) {
+      if (($t -is [string]) -and $t.StartsWith($script:ClaudePrefix, $script:Ordinal)) { $seen.Add($t.Substring($script:ClaudePrefix.Length)) }
+    }
+    $parsed.world_tools = $seen
   }
+  if ($requests.Count -gt 0) { $parsed.requests = $requests.Count }
   foreach ($use in $uses) {
     $name = [string](Get-Field $use 'name')
     if (-not $name.StartsWith($script:ClaudePrefix, $script:Ordinal)) { continue }
@@ -1126,7 +1154,7 @@ function Read-ClaudeStream($rows) {
 # codex exec --json 的每一行。world 连接设成 required，连不上时 codex 不起会话、只在标准错误里说。
 function Read-CodexStream($rows) {
   $parsed = @{ events = $rows.Count; mcp = $null; calls = (New-Object System.Collections.Generic.List[object]); final = $null;
-    errors = (New-Object System.Collections.Generic.List[string]); api_status = $null; usage = $null }
+    errors = (New-Object System.Collections.Generic.List[string]); api_status = $null; usage = $null; world_tools = $null; requests = $null }
   foreach ($r in $rows) {
     if (-not ($r -is [System.Collections.IDictionary])) { continue }
     $type = Get-Field $r 'type'
@@ -1259,18 +1287,25 @@ function Get-JudgeOutcome($parsed, $batch, $cfg) {
   if ($targets.Count -eq 0) { $outcome.failure = New-Failure 'other' 'targets_empty'; return $outcome }
   $answer = Get-Field (Get-Answer $parsed) 'results'
   if (-not ($answer -is [System.Collections.IList])) { $outcome.failure = New-Failure 'other' 'answer_unreadable'; return $outcome }
+  # 答复里的 key 是 Get-JudgePrompt 给的编号；模型把它写成数字也认。
   $by = @{}
-  foreach ($e in $batch) { $by[$e['name']] = $e }
+  $n = 0
+  foreach ($e in $batch) { $n++; $by[$n.ToString($script:Invariant)] = $e }
   $seen = @{}
   foreach ($r in $answer) {
     $name = ''
-    if ($r -is [System.Collections.IDictionary]) { $name = Get-Name $r }
+    $raw = Get-Field $r 'key'
+    if ($raw -is [string]) { $name = $raw }
+    elseif (Test-Number $raw) { $name = Format-JsNumber $raw }
     if (-not $by.ContainsKey($name)) {
-      $outcome.mismatches.Add([ordered]@{ item_id = (Get-Field $r 'item_id'); item_version = (Get-Field $r 'item_version'); reason = 'not_in_batch' })
+      $outcome.mismatches.Add([ordered]@{ key = $raw; reason = 'not_in_batch' })
     }
-    elseif ($seen.ContainsKey($name)) { $outcome.mismatches.Add([ordered]@{ item_id = $r['item_id']; item_version = $r['item_version']; reason = 'duplicate' }) }
+    elseif ($seen.ContainsKey($name)) {
+      $outcome.mismatches.Add([ordered]@{ key = $name; item_id = $by[$name]['item_id']; item_version = $by[$name]['item_version']; reason = 'duplicate' })
+    }
     elseif (-not (Test-HasKey $r 'result')) {
-      $outcome.mismatches.Add([ordered]@{ item_id = $r['item_id']; item_version = $r['item_version']; reason = 'no_result' }); $seen[$name] = $true
+      $outcome.mismatches.Add([ordered]@{ key = $name; item_id = $by[$name]['item_id']; item_version = $by[$name]['item_version']; reason = 'no_result' })
+      $seen[$name] = $true
     }
     elseif ($null -eq $r['result']) { $outcome.accepted.Add(@{ row = $by[$name]; result = $null }); $seen[$name] = $true }
     elseif (Test-ValidItem $r['result']) {
@@ -1280,7 +1315,8 @@ function Get-JudgeOutcome($parsed, $batch, $cfg) {
     }
     else { $outcome.invalid.Add($by[$name]); $seen[$name] = $true }
   }
-  foreach ($e in $batch) { if (-not $seen.ContainsKey($e['name'])) { $outcome.unanswered.Add($e['name']) } }
+  $n = 0
+  foreach ($e in $batch) { $n++; if (-not $seen.ContainsKey($n.ToString($script:Invariant))) { $outcome.unanswered.Add($e['name']) } }
   return $outcome
 }
 
@@ -1535,7 +1571,7 @@ function Get-Gate([string]$roundsDir, [string]$format) {
   $sorted = $rounds.ToArray()
   $keys = New-Object string[] $sorted.Length
   for ($i = 0; $i -lt $sorted.Length; $i++) { $keys[$i] = [string](Get-Field $sorted[$i] 'started_at') + [char]0 + [string](Get-Field $sorted[$i] 'round_id') }
-  [System.Array]::Sort($keys, $sorted, [System.StringComparer]::Ordinal)
+  Invoke-SortBy $keys $sorted
   $rounds = New-Object System.Collections.Generic.List[object]
   foreach ($r in $sorted) { $rounds.Add($r) }
   $failures = 0
@@ -1646,14 +1682,51 @@ function ConvertTo-ArgString([string]$a) {
   return $sb.ToString()
 }
 
+# ---------- 只给模型看这次要用的 world 工具（Claude Code） ----------
+# --allowedTools 只管免确认，world 连接上的六十来个工具（schema 约 70 KB）照样每次请求都带上；--disallowedTools 才把工具从模型看到的里拿掉。
+# 工具名从各次调用 init 里列的学来（world-tools.json），第一次调用还不知道，就全带着。
+
+# ConvertFrom-JsText 交出的数组只有一项时会被拆成那一项本身，这里包回数组。
+function Get-ToolNames($v) {
+  $names = New-Object System.Collections.Generic.List[string]
+  if ($v -is [string]) { $v = @($v) }
+  if ($v -is [System.Collections.IList]) {
+    foreach ($x in $v) { if (($x -is [string]) -and ($x -cmatch '\A[A-Za-z0-9_-]{1,128}\z') -and -not $names.Contains($x)) { $names.Add($x) } }
+  }
+  $sorted = $names.ToArray()
+  [System.Array]::Sort($sorted, [System.StringComparer]::Ordinal)
+  return , $sorted
+}
+
+function Get-HiddenTools([string]$kind) {
+  $known = Read-JsonFile (Join-Path $script:StateDir 'world-tools.json')
+  if (-not $known.ok) { return '' }
+  $hidden = @((Get-ToolNames $known.value) | Where-Object { $script:RoundTools[$kind] -notcontains $_ } | ForEach-Object { $script:ClaudePrefix + $_ })
+  return ($hidden -join ',')
+}
+
+function Update-KnownTools($seen) {
+  if (-not ($seen -is [System.Collections.IList])) { return }
+  $file = Join-Path $script:StateDir 'world-tools.json'
+  $known = Read-JsonFile $file
+  $all = New-Object System.Collections.Generic.List[object]
+  if ($known.ok) { foreach ($x in (Get-ToolNames $known.value)) { $all.Add($x) } }
+  foreach ($x in $seen) { $all.Add($x) }
+  $text = ConvertTo-JsJson (Get-ToolNames $all)
+  if ($known.present -and $known.ok -and ((ConvertTo-JsJson (Get-ToolNames $known.value)) -ceq $text)) { return }
+  try { Write-Atomic $file $text $script:Work $true } catch { }
+}
+
 function Get-CliArguments([string]$kind) {
   $list = New-Object System.Collections.Generic.List[string]
   if ($script:Agent -ceq 'claude') {
     $tools = @($script:RoundTools[$kind] | ForEach-Object { $script:ClaudePrefix + $_ }) -join ','
     $model = $env:TKOS_CAPTURE_CLAUDE_MODEL
     if (-not $model) { $model = 'sonnet' }
-    foreach ($a in @('-p', '--no-session-persistence', '--setting-sources', '', '--plugin-dir', $script:WorldPlugin, '--tools', '', '--allowedTools', $tools,
-        '--permission-mode', 'dontAsk', '--output-format', 'stream-json', '--verbose', '--model', $model)) { $list.Add($a) }
+    foreach ($a in @('-p', '--no-session-persistence', '--setting-sources', '', '--plugin-dir', $script:WorldPlugin, '--tools', '', '--allowedTools', $tools)) { $list.Add($a) }
+    $hidden = Get-HiddenTools $kind
+    if ($hidden) { $list.Add('--disallowedTools'); $list.Add($hidden) }
+    foreach ($a in @('--permission-mode', 'dontAsk', '--output-format', 'stream-json', '--verbose', '--model', $model)) { $list.Add($a) }
     return , $list
   }
   $enabled = '[' + ((@($script:RoundTools[$kind] | ForEach-Object { '"' + $_ + '"' })) -join ',') + ']'
@@ -1761,12 +1834,15 @@ function Get-Left { return $script:RoundLimit - [int]([DateTime]::UtcNow - $scri
 # 一次模型调用：记进这一轮的经过，交出解析好的输出（带 failure）。
 function Invoke-Call([string]$kind, [int]$limit, [string]$prompt) {
   $run = Invoke-Cli $kind $limit $prompt
-  if ($script:Agent -ceq 'claude') { Remove-ClaudeProject; $parsed = Read-ClaudeStream (Read-Lines $run.out) }
+  if ($script:Agent -ceq 'claude') { Remove-ClaudeProject; $parsed = Read-ClaudeStream (Read-Lines $run.out); Update-KnownTools $parsed.world_tools }
   else { $parsed = Read-CodexStream (Read-Lines $run.out) }
+  $visible = $null
+  if ($parsed.world_tools -is [System.Collections.IList]) { $visible = $parsed.world_tools.Count }
   $tail = [string]$run.err
   if ($tail.Length -gt 4000) { $tail = $tail.Substring($tail.Length - 4000) }
   $parsed.failure = Get-Failure $parsed $script:Agent ([int]$run.status) ([bool]$run.timed_out) $tail
-  $script:State.calls.Add([ordered]@{ kind = $kind; exit_code = $run.status; seconds = $run.seconds; timed_out = $run.timed_out; failure = $parsed.failure; usage = $parsed.usage })
+  $script:State.calls.Add([ordered]@{ kind = $kind; exit_code = $run.status; seconds = $run.seconds; timed_out = $run.timed_out; failure = $parsed.failure; usage = $parsed.usage;
+    visible_tools = $visible; requests = $parsed.requests })
   $script:State.exit_code = $run.status
   if ($null -ne $parsed.usage) {
     if ($null -eq $script:State.usage) { $script:State.usage = [ordered]@{ input_tokens = 0; cached_input_tokens = 0; output_tokens = 0 } }
@@ -1950,7 +2026,7 @@ function Test-Unsupported([string]$stateDir) {
   return $true
 }
 
-# ---------- 「开始采集」与迁移（ADR 决定七、八）：对话里的 Agent 调用的三个子命令，同 setup.jq ----------
+# ---------- 「开始采集」与迁移（ADR 决定七、八）：对话里的 Agent 调用的三个子命令，同 setup.jq（回退用的 export 在后面） ----------
 # capture.ps1 <check|enable|import> <claude|codex> [选择记录文件]：标准输出上交一行 JSON（UTF-8），拒绝时退出码 1。
 
 function Write-Out($value) {
@@ -2296,6 +2372,217 @@ function Invoke-Import([string]$agent, [string]$format, [string]$stateDir, [stri
   finally { try { [System.IO.Directory]::Delete($work, $true) } catch { } }
 }
 
+# ---------- export：回退到组件（docs/world-capture-rollback.md 第 3 节），迁移的反方向；规则同 setup.jq 的 export_* ----------
+
+function Test-ExportRecord($rec, [string]$agent, [string]$selection) {
+  return ($rec -is [System.Collections.IDictionary]) -and (Test-Is (Get-Field $rec 'format') 'world-capture-export/0.1') `
+    -and (Test-Is (Get-Field $rec 'agent') $agent) -and (Test-Is (Get-Field $rec 'selection_id') $selection)
+}
+
+# results\ 里每个文件读成一项（读不出的跳过）。
+function Read-ResultFiles([string]$dir) {
+  $rows = New-Object System.Collections.Generic.List[object]
+  if (-not [System.IO.Directory]::Exists($dir)) { return , $rows }
+  foreach ($f in [System.IO.Directory]::GetFiles($dir, '*.json')) {
+    try { $v = ConvertFrom-JsText (Read-SharedText $f) } catch { continue }
+    $rows.Add($v)
+  }
+  return , $rows
+}
+
+# 要写进组件检查点的条目（同 setup.jq 的 export_entries）。同一个 item_id 有几个版本时取时刻最晚的
+# （delivered\ 按 at，results\ 按 judged_at；时刻相同取 delivered\ 的）。
+function Get-ExportEntries($cp, [string]$deliveredText, $resultRows, $readback, [string]$selection, [string]$format) {
+  $lines = New-Object System.Collections.Generic.List[object]
+  $done = @{}
+  foreach ($line in $deliveredText.Split([char]10)) {
+    try { $d = ConvertFrom-JsText $line } catch { continue }
+    if (-not (($d -is [System.Collections.IDictionary]) -and (Test-ItemShape $d))) { continue }
+    $done[(Get-Name $d)] = $true
+    $lines.Add($d)
+  }
+  $world = @{}
+  foreach ($row in (Get-List $readback 'imports')) {
+    if (-not ($row -is [System.Collections.IDictionary])) { continue }
+    $sid = Get-Field $row 'source_item_id'
+    $sv = Get-Field $row 'source_version'
+    if ((Test-Is (Get-Field $row 'selection_id') $selection) -and ($sid -is [string]) -and ($sv -is [string])) { $world[$sid + '@' + $sv] = $true }
+  }
+  $candidates = New-Object System.Collections.Generic.List[object]
+  $seen = @{}
+  $nulls = 0
+  $found = 0
+  $open = 0
+  $unjudged = 0
+  $readbackItems = New-Object System.Collections.Generic.List[object]
+  foreach ($r in $resultRows) {
+    if (-not (($r -is [System.Collections.IDictionary]) -and (Test-Is (Get-Field $r 'format') $format) -and (Test-ItemShape $r))) { continue }
+    $name = Get-Name $r
+    if ($done.ContainsKey($name) -or $seen.ContainsKey($name)) { continue }
+    $seen[$name] = $true
+    $open++
+    if (-not (Test-HasKey $r 'result')) { $unjudged++; continue }
+    if ($null -eq $r['result']) { $candidates.Add($r); $nulls++; continue }
+    $readbackItems.Add([ordered]@{ item_id = $r['item_id']; item_version = $r['item_version'] })
+    if ($world.ContainsKey($name)) { $candidates.Add($r); $found++ }
+  }
+  $add = [ordered]@{}
+  $when = @{}
+  foreach ($pass in @(@{ rows = $candidates; key = 'judged_at' }, @{ rows = $lines; key = 'at' })) {
+    foreach ($row in $pass.rows) {
+      $id = [string]$row['item_id']
+      $t = Get-Field $row $pass.key
+      if (-not ($t -is [string])) { $t = '' }
+      if ((-not $add.Contains($id)) -or ([string]::CompareOrdinal($t, $when[$id]) -ge 0)) { $add[$id] = [string]$row['item_version']; $when[$id] = $t }
+    }
+  }
+  $progress = Get-Field $cp 'progress'
+  $before = Get-Field $progress 'entries'
+  $merged = [ordered]@{}
+  foreach ($k in $before.Keys) { $merged[[string]$k] = $before[$k] }
+  $added = 0
+  foreach ($k in $add.Keys) {
+    if (-not ($merged.Contains($k) -and ($merged[$k] -ceq $add[$k]))) { $added++ }
+    $merged[$k] = $add[$k]
+  }
+  $nextProgress = [ordered]@{}
+  foreach ($k in $progress.Keys) { $nextProgress[[string]$k] = $progress[$k] }
+  $nextProgress['entries'] = $merged
+  $next = [ordered]@{}
+  foreach ($k in $cp.Keys) { $next[[string]$k] = $cp[$k] }
+  $next['progress'] = $nextProgress
+  $next['pending'] = $null
+  return @{ checkpoint = $next; added = $added; pending_cleared = ($null -ne (Get-Field $cp 'pending')); readback = $readbackItems; found = $found;
+    unjudged = $unjudged; rejudge = ($open - $nulls - $found) }
+}
+
+# 写组件检查点：临时文件放在同一目录，再整份替换（目标在时用 File.Replace，不先删）。杀毒或索引一时占着文件时，
+# 有限次重试（同库的 renameOver）。
+function Write-Replace([string]$path, [string]$text) {
+  $tmp = Join-Path (Split-Path -Parent $path) ('.' + [guid]::NewGuid().ToString('N') + '.tmp')
+  [System.IO.File]::WriteAllText($tmp, $text, $script:Utf8)
+  try {
+    for ($attempt = 1; ; $attempt++) {
+      try {
+        # 不要备份文件：传 $null 会被 PowerShell 换成空串，File.Replace 拿到空路径就报参数错，要用 [NullString]::Value。
+        if ([System.IO.File]::Exists($path)) { [System.IO.File]::Replace($tmp, $path, [NullString]::Value) } else { [System.IO.File]::Move($tmp, $path) }
+        return
+      }
+      catch [System.IO.IOException], [System.UnauthorizedAccessException] {
+        if ($attempt -ge 10) { throw }
+        Start-Sleep -Milliseconds (10 * $attempt)
+      }
+    }
+  }
+  finally { if ([System.IO.File]::Exists($tmp)) { [System.IO.File]::Delete($tmp) } }
+}
+
+# 不带文件时只看要读回哪几条，什么都不写。带文件时：先在 export.json 记下这一项、从 config.json 摘掉它，
+# 等手上那一轮结束，再把插件已处理的条目写进组件检查点、置空组件没收尾的送出计划；改之前的原样存进 export\。
+function Invoke-Export([string]$agent, [string]$format, [string]$stateDir, [string]$file, [string]$readbackFile) {
+  $reason = Get-SupportReason
+  if ($null -ne $reason) { Write-Refusal $reason; return }
+  if ($file) {
+    if (-not [System.IO.File]::Exists($file)) { Write-Refusal 'selection_file_missing'; return }
+    if ((-not $readbackFile) -or (-not [System.IO.File]::Exists($readbackFile))) { Write-Refusal 'readback_file_missing'; return }
+  }
+  $component = Get-ComponentDir
+  if (($null -eq $component) -or (-not [System.IO.File]::Exists((Join-Path $component 'settings.json')))) { Write-Refusal 'component_missing'; return }
+  if (Test-Exists (Join-Path $component 'agent-channel.json')) { Write-Refusal 'component_running'; return }
+  $s = Get-ComponentSettings (Read-JsonFile (Join-Path $component 'settings.json')).value
+  $configFile = Read-JsonFile (Join-Path $stateDir 'config.json')
+  $config = $configFile.value
+  $recordFile = Read-JsonFile (Join-Path $stateDir 'export.json')
+  if ($null -eq $s) { Write-Refusal 'component_settings_unreadable'; return }
+  if (-not (Test-Is $s.source_format $format)) { Write-Refusal 'component_format_mismatch'; return }
+  if ($null -eq $s.selection_id) { Write-Refusal 'component_no_selection'; return }
+  if ($s.capture_enabled) { Write-Refusal 'component_capture_enabled'; return }
+  if (Test-Unusable $configFile) { Write-Refusal 'config_unreadable'; return }
+  $configDevice = Get-ConfigDevice $config
+  if (($null -ne $configDevice) -and -not ($configDevice -ceq $s.device_id)) { Write-Refusal 'device_mismatch'; return }
+  if (Test-Unusable $recordFile) { Write-Refusal 'export_record_unreadable'; return }
+  $rec = $recordFile.value
+  $configured = $null -ne (Get-ConfigEntryOf $config $agent $format)
+  $resume = Test-ExportRecord $rec $agent $s.selection_id
+  $checkpointPath = Join-Path $component ('source-' + $s.selection_id + '.json')
+  $checkpoint = Read-JsonFile $checkpointPath
+  $backup = Join-Path (Join-Path $stateDir 'export') ('source-' + $s.selection_id + '.json')
+  $saved = Read-JsonFile $backup
+  # 做完了只在组件检查点又和改之前存的那份相同时（本人从备份恢复了组件目录）才再做一次。
+  $restored = $saved.present -and $saved.ok -and $checkpoint.ok -and ($null -ne $saved.value) -and (Test-SameJson $saved.value $checkpoint.value)
+  if ((-not $configured) -and $resume -and ($null -ne (Get-Field $rec 'done_at')) -and (-not $restored)) {
+    Write-Out ([ordered]@{ ok = $true; agent = $agent; selection_id = $s.selection_id; already = $true }); return
+  }
+  if ($configured) { $entry = Get-Field (Get-Field $config 'agents') $agent } elseif ($resume) { $entry = Get-Field $rec 'entry' } else { $entry = $null }
+  if ($null -eq $entry) { Write-Refusal 'not_migrated'; return }
+  if (-not (Test-Is (Get-Field $entry 'selection_id') $s.selection_id)) { Write-Refusal 'selection_mismatch'; return }
+  if ((-not $checkpoint.present) -or (Test-Unusable $checkpoint) -or (-not (Test-CheckpointShape $checkpoint.value))) { Write-Refusal 'checkpoint_unreadable'; return }
+  if ($null -eq (Get-Field $checkpoint.value 'progress')) { Write-Refusal 'checkpoint_without_progress'; return }
+  $deliveredPath = Join-Path (Join-Path $stateDir 'delivered') ($format.Replace('/', '\') + '.jsonl')
+  $lock = Join-Path $stateDir 'round.lock'
+  if (-not $file) {
+    $deliveredText = ''
+    if ([System.IO.File]::Exists($deliveredPath)) { $deliveredText = Read-SharedText $deliveredPath }
+    $e = Get-ExportEntries $checkpoint.value $deliveredText (Read-ResultFiles (Join-Path $stateDir 'results')) $null $s.selection_id $format
+    Write-Out ([ordered]@{ ok = $true; agent = $agent; selection_id = $s.selection_id; dry_run = $true; configured = $configured;
+      round_running = ([System.IO.Directory]::Exists($lock) -and -not (Test-LockStale $lock)); added = $e.added; pending_cleared = $e.pending_cleared;
+      readback = $e.readback; rejudge = $e.unjudged })
+    return
+  }
+  $sel = (Read-JsonFile $file).value
+  if (-not (Test-Is (Get-Field $sel 'selection_id') $s.selection_id)) { Write-Refusal 'selection_mismatch'; return }
+  $r = Get-SelectionEntry $sel $agent $format 'component_window' $s.device_id $s.root
+  if ($r.refused) { Write-Refusal $r.refused; return }
+  $wanted = Get-Field $entry 'selection_version'
+  if (-not ((Test-Number $wanted) -and ($r.entry.selection_version -eq $wanted))) { Write-Refusal 'selection_version_changed'; return }
+  $rbFile = Read-JsonFile $readbackFile
+  $rb = $rbFile.value
+  if ((-not $rbFile.ok) -or (-not ($rb -is [System.Collections.IDictionary])) -or (-not ((Get-Field $rb 'imports') -is [System.Collections.IList]))) {
+    Write-Refusal 'readback_unreadable'; return
+  }
+  if (-not (Test-Is (Get-Field $rb 'selection_id') $s.selection_id)) { Write-Refusal 'readback_mismatch'; return }
+  if (-not ((Get-Field $rb 'complete') -is [bool] -and (Get-Field $rb 'complete'))) { Write-Refusal 'readback_incomplete'; return }
+
+  $state = Initialize-State $stateDir $format
+  $work = $state.work
+  try {
+    $at = Get-Now
+    if ($configured) {
+      Write-Atomic (Join-Path $stateDir 'export.json') (ConvertTo-JsJson ([ordered]@{ format = 'world-capture-export/0.1'; agent = $agent;
+        selection_id = $s.selection_id; entry = $entry; started_at = $at; done_at = $null })) $work $true
+      # 新的一次：上一次回退存的检查点不再是「改之前」的那份。
+      if ([System.IO.File]::Exists($backup)) { [System.IO.File]::Delete($backup) }
+      $agents = [ordered]@{}
+      foreach ($k in $config['agents'].Keys) { if (-not ([string]$k -ceq $agent)) { $agents[[string]$k] = $config['agents'][$k] } }
+      $nextConfig = [ordered]@{}
+      foreach ($k in $config.Keys) { $nextConfig[[string]$k] = $config[$k] }
+      $nextConfig['agents'] = $agents
+      Write-Atomic (Join-Path $stateDir 'config.json') (ConvertTo-JsJson $nextConfig) $work $true
+    }
+    # 这一项已经摘掉，不会再起新的一轮；手上那一轮还在跑，等它结束再跑一次。
+    if ([System.IO.Directory]::Exists($lock) -and -not (Test-LockStale $lock)) { Write-Refusal 'round_running'; return }
+    $deliveredText = ''
+    if ([System.IO.File]::Exists($deliveredPath)) { $deliveredText = Read-SharedText $deliveredPath }
+    $e = Get-ExportEntries $checkpoint.value $deliveredText (Read-ResultFiles (Join-Path $stateDir 'results')) $rb $s.selection_id $format
+    New-Directory (Join-Path $stateDir 'export')
+    if (-not [System.IO.File]::Exists($backup)) { [System.IO.File]::Copy($checkpointPath, $backup) }
+    try { Write-Replace $checkpointPath (ConvertTo-JsJson $e.checkpoint) } catch { Write-Refusal 'component_unwritable'; return }
+    $record = (Read-JsonFile (Join-Path $stateDir 'export.json')).value
+    $nextRecord = [ordered]@{}
+    foreach ($k in $record.Keys) { $nextRecord[[string]$k] = $record[$k] }
+    $nextRecord['done_at'] = $at
+    $nextRecord['added'] = $e.added
+    $nextRecord['pending_cleared'] = $e.pending_cleared
+    $nextRecord['readback'] = $e.readback.Count
+    $nextRecord['found'] = $e.found
+    $nextRecord['rejudge'] = $e.rejudge
+    Write-Atomic (Join-Path $stateDir 'export.json') (ConvertTo-JsJson $nextRecord) $work $true
+    Write-Out ([ordered]@{ ok = $true; agent = $agent; selection_id = $s.selection_id; already = $false; added = $e.added; pending_cleared = $e.pending_cleared;
+      readback = $e.readback.Count; found = $e.found; rejudge = $e.rejudge })
+  }
+  finally { try { [System.IO.Directory]::Delete($work, $true) } catch { } }
+}
+
 function Read-Stdin {
   $stream = [Console]::OpenStandardInput()
   $memory = New-Object System.IO.MemoryStream
@@ -2306,7 +2593,7 @@ function Read-Stdin {
 function Invoke-Main($cli) {
   $mode = 'hook'
   $at = 0
-  if (($cli.Count -gt 0) -and (@('check', 'enable', 'import') -ccontains [string]$cli[0])) { $mode = [string]$cli[0]; $at = 1; $script:Command = $mode }
+  if (($cli.Count -gt 0) -and (@('check', 'enable', 'import', 'export') -ccontains [string]$cli[0])) { $mode = [string]$cli[0]; $at = 1; $script:Command = $mode }
   elseif (($cli.Count -gt 0) -and ($cli[0] -ceq '__worker')) { $mode = 'worker'; $at = 1 }
   $agent = [string]$cli[$at]
   $hookEvent = [string]$cli[$at + 1]
@@ -2320,6 +2607,7 @@ function Invoke-Main($cli) {
   if ($mode -ceq 'check') { Invoke-Check $agent $format $stateDir; return }
   if ($mode -ceq 'enable') { Invoke-Enable $agent $format $stateDir $hookEvent; return }
   if ($mode -ceq 'import') { Invoke-Import $agent $format $stateDir $hookEvent; return }
+  if ($mode -ceq 'export') { Invoke-Export $agent $format $stateDir $hookEvent ([string]$cli[$at + 2]); return }
 
   if (Test-Unsupported $stateDir) { return }
   if ($mode -ceq 'worker') {

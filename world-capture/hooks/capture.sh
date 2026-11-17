@@ -3,12 +3,13 @@
 # 钩子的标准输出会被 Agent 当作指令解析（Stop 钩子输出 {"decision":"block"} 会拦住会话），所以这里什么都不输出，
 # 任何失败都静默 exit 0。只用系统自带的 sh、/usr/bin/jq 和 /usr/bin/openssl；读取规则在同目录的 capture.jq，
 # 后台轮（判断、落盘、送出、回执）的数据部分在 round.jq，提示词在 round-prompt.md。
-# 另有三个子命令给「开始采集」那次对话里的 Agent 用（capture.sh <check|enable|import> <claude|codex> [选择记录文件]）：
+# 另有三个子命令给「开始采集」那次对话里的 Agent 用（capture.sh <check|enable|import> <claude|codex> [选择记录文件]），
+# 一个给回退到组件时用（capture.sh export <claude|codex> [选择记录文件 读回记录文件]）：
 # 它们在标准输出上交一行 JSON，拒绝时退出码 1；规则在 setup.jq。
 
 [ -n "${WORLD_AUTO_EXTRACT_ROUND:-}" ] && exit 0
 case "${1:-}" in
-  check | enable | import) command=$1; shift; exec 2>/dev/null ;;
+  check | enable | import | export) command=$1; shift; exec 2>/dev/null ;;
   *) command=; exec >/dev/null 2>&1 ;;
 esac
 # 装了 Git Bash 的 Windows 会把 Claude Code 那一行钩子整行交给 Git Bash，PowerShell 那段已经干过活了。
@@ -315,18 +316,23 @@ world_skill() {
   fi
 }
 
-# 队列、results/、delivered/ 读一遍，算这一轮该做什么（round.jq 的 plan）。
+# 一个目录下的 entry-*.json，每行前面加上文件名（不带 .json）和一个制表符；round.jq 的 by_file 按文件名拼回去再逐个解析。
+# awk 按文件分行：末尾没换行（被截断）的文件不会和下一个文件接成一行。直接 cat 拼起来，或一次把几个文件交给 jq 解析都不行：
+# 前者会把截断的文件和下一个文件的第一行接成一行，两条都读不出；后者读到第一个坏文件就停，后面的都读不到。
+labeled_lines() {
+  find "$1" -type f -name 'entry-*.json' -exec /usr/bin/awk \
+    '{ n = FILENAME; sub(/.*\//, "", n); sub(/\.json$/, "", n); print n "\t" $0 }' {} + 2>/dev/null
+}
+
+# 队列、results/、delivered/ 读一遍，算这一轮该做什么（round.jq 的 plan）。读不出的文件只跳过它自己。
 make_plan() {
-  find "$queue" -type f -name 'entry-*.json' -exec cat {} + 2>/dev/null >"$work/queue.jsonl"
+  labeled_lines "$queue" >"$work/queue.jsonl"
   : >"$work/results.jsonl"
-  if [ -n "$(ls "$home/results" 2>/dev/null)" ]; then
-    find "$home/results" -type f -name 'entry-*.json' -exec "$JQ" -c \
-      '{name: (input_filename | sub(".*/"; "") | sub("\\.json$"; "")), value: .}' {} + 2>/dev/null >"$work/results.jsonl"
-  fi
+  [ -n "$(ls "$home/results" 2>/dev/null)" ] && labeled_lines "$home/results" >"$work/results.jsonl"
   [ -f "$delivered" ] && src=$delivered || src=/dev/null
   jqc -n -c --rawfile queue "$work/queue.jsonl" --rawfile results "$work/results.jsonl" --rawfile delivered "$src" --arg format "$format" \
-    --rawfile prompts "$here/round-prompt.md" 'include "round"; plan($queue | split("\n") | map(fromjson? // empty);
-       $results | split("\n") | map(fromjson? // empty) | map(select(.value.format == $format)); $delivered;
+    --rawfile prompts "$here/round-prompt.md" 'include "round"; plan($queue | by_file | map(.value);
+       $results | by_file | map(select(.value.format == $format)); $delivered;
        prompt_section($prompts; "omitted"))' >"$work/plan.json"
 }
 
@@ -385,9 +391,12 @@ call() {
   if [ "$agent" = claude ]; then
     [ -n "${CLAUDE_CONFIG_DIR:-}" ] && set -- "$@" CLAUDE_CONFIG_DIR="$CLAUDE_CONFIG_DIR"
     tools=$(jqc -n -r --arg kind "$kind" 'include "round"; TOOLS[$kind] | map(CLAUDE_PREFIX + .) | join(",")')
+    hidden=
+    [ -f "$home/world-tools.json" ] && hidden=$(jqc -r --arg kind "$kind" 'include "round"; hidden_tools($kind)' "$home/world-tools.json" 2>/dev/null)
     set -- "$@" "$program" -p --no-session-persistence --setting-sources "" --plugin-dir "${skill%/skills/*}" --tools "" \
-      --allowedTools "$tools" --permission-mode dontAsk --output-format stream-json --verbose \
-      --model "${TKOS_CAPTURE_CLAUDE_MODEL:-sonnet}"
+      --allowedTools "$tools"
+    [ -n "$hidden" ] && set -- "$@" --disallowedTools "$hidden"
+    set -- "$@" --permission-mode dontAsk --output-format stream-json --verbose --model "${TKOS_CAPTURE_CLAUDE_MODEL:-sonnet}"
   else
     [ -n "${CODEX_HOME:-}" ] && set -- "$@" CODEX_HOME="$CODEX_HOME"
     tools=$(jqc -n -c --arg kind "$kind" 'include "round"; TOOLS[$kind]')
@@ -407,12 +416,26 @@ call() {
   jqc -n -R -c --arg agent "$agent" --argjson status "$status" --argjson timeout "$timed_out" --rawfile err "$work/err.tail" \
     "include \"round\"; [inputs | fromjson? // empty] | $parser | . + {failure: classify(\$agent; \$status; \$timeout; \$err)}" \
     "$work/out" >"$work/call.json" || printf '{"calls":[],"failure":{"class":"other","detail":"output_unreadable"}}' >"$work/call.json"
-  note '.calls += [{kind: $kind, exit_code: $status, seconds: $seconds, timed_out: $timeout, failure: $call[0].failure, usage: $call[0].usage}]
+  [ "$agent" = claude ] && learn_tools
+  note '.calls += [{kind: $kind, exit_code: $status, seconds: $seconds, timed_out: $timeout, failure: $call[0].failure, usage: $call[0].usage,
+      visible_tools: ($call[0].world_tools | if type == "array" then length else null end), requests: $call[0].requests}]
     | .exit_code = $status
     | .usage = (if $call[0].usage == null then .usage else
         {input_tokens: ((.usage.input_tokens // 0) + $call[0].usage.input_tokens), cached_input_tokens: ((.usage.cached_input_tokens // 0) + $call[0].usage.cached_input_tokens),
          output_tokens: ((.usage.output_tokens // 0) + $call[0].usage.output_tokens)} end)' \
     --arg kind "$kind" --argjson status "$status" --argjson seconds "$seconds" --argjson timeout "$timed_out" --slurpfile call "$work/call.json"
+}
+
+# init 里列过的 world 工具名并进 world-tools.json（round.jq 的 known_tools）；文件坏了就只按这一次的重写。
+learn_tools() {
+  file="$home/world-tools.json"
+  # 空文件 jq 什么都不输出、退出码却是 0，所以还要核输出不空。
+  if ! { [ -f "$file" ] && jqc -c --slurpfile call "$work/call.json" 'include "round"; known_tools(.; $call[0].world_tools)' "$file" >"$work/tools.json" 2>/dev/null \
+      && [ -s "$work/tools.json" ]; }; then
+    jqc -n -c --slurpfile call "$work/call.json" 'include "round"; known_tools([]; $call[0].world_tools)' >"$work/tools.json" 2>/dev/null || return 0
+  fi
+  cmp -s "$work/tools.json" "$file" || mv -f "$work/tools.json" "$file"
+  return 0
 }
 
 # claude -p 每次在 projects 下按工作目录留一个目录：里面是空的 memory/（核查 9），工具返回超过约 50 KB 时还有
@@ -552,7 +575,7 @@ round() {
   release_lock
 }
 
-# ---------- 「开始采集」与迁移（ADR 决定七、八）：对话里的 Agent 调用的三个子命令 ----------
+# ---------- 「开始采集」与迁移（ADR 决定七、八）：对话里的 Agent 调用的三个子命令（回退用的 export 在后面） ----------
 
 # 这种 Agent 的数据目录下要读的文件夹：Claude Code 是 projects，Codex 是 sessions（钩子只读其中未压缩的 .jsonl）。
 data_folder() {
@@ -683,10 +706,90 @@ EOF
   exit 0
 }
 
+# export：回退到组件（docs/world-capture-rollback.md 第 3 节），迁移的反方向。不带文件时只看要读回哪几条，什么都不写。
+# 带文件时：先在 export.json 记下这一项、从 config.json 摘掉它（钩子从此不读这种 Agent 的会话、不起后台轮），
+# 等手上那一轮结束，再把插件已处理的条目写进组件检查点、置空组件没收尾的送出计划。组件目录只改检查点这一个文件，
+# 改之前的原样存进 export/。中途断了重跑，按 export.json 接着做；做完再跑交回 already。
+setup_export() {
+  support_reason
+  [ -z "$reason" ] || refuse "$reason"
+  if [ -n "${1:-}" ]; then
+    [ -f "$1" ] || refuse selection_file_missing
+    [ -n "${2:-}" ] && [ -f "$2" ] || refuse readback_file_missing
+  fi
+  [ -f "$component/settings.json" ] || refuse component_missing
+  [ -e "$component/agent-channel.json" ] && refuse component_running
+  chosen=$(jqc -r 'include "setup"; component_settings | .selection_id // empty' "$component/settings.json")
+  checkpoint=/dev/null
+  [ -n "$chosen" ] && checkpoint=$(raw "$component/source-$chosen.json")
+  plan=$(jqc -n -c --arg agent "$agent" --arg format "$format" --rawfile config "$(raw "$home/config.json")" \
+    --rawfile settings "$component/settings.json" --rawfile record "$(raw "$home/export.json")" --rawfile checkpoint "$checkpoint" \
+    --rawfile backup "$(raw "$home/export/source-$chosen.json")" \
+    'include "setup"; export_plan($agent; $format; $config; $settings; $record; $checkpoint; $backup)') || refuse checkpoint_unreadable
+  refused_in "$plan"
+  if [ "$(printf '%s' "$plan" | jqc -r '.already')" = true ]; then
+    printf '%s' "$plan" | jqc -c --arg agent "$agent" '{ok: true, agent: $agent, selection_id, already: true}'
+    exit 0
+  fi
+  done_file=$(raw "$home/delivered/$format.jsonl")
+  running=false
+  [ -d "$home/round.lock" ] && ! lock_stale && running=true
+  if [ -z "${1:-}" ]; then
+    results_lines | jqc -s -R -c --rawfile checkpoint "$checkpoint" --rawfile delivered "$done_file" --arg format "$format" \
+      --argjson plan "$plan" --argjson running "$running" --arg agent "$agent" \
+      'include "setup"; export_entries($checkpoint; $delivered; .; ""; $plan.selection_id; $format) as $e
+       | {ok: true, agent: $agent, selection_id: $plan.selection_id, dry_run: true, configured: $plan.configured, round_running: $running,
+          added: $e.added, pending_cleared: $e.pending_cleared, readback: $e.readback, rejudge: $e.unjudged}' || refuse failed
+    exit 0
+  fi
+  checked=$(jqc -n -c --arg agent "$agent" --arg format "$format" --argjson plan "$plan" --rawfile selection "$1" \
+    'include "setup"; export_selection($agent; $format; $plan; $selection)') || refuse selection_unreadable
+  refused_in "$checked"
+  checked=$(jqc -n -c --rawfile readback "$2" --arg selection "$(printf '%s' "$plan" | jqc -r '.selection_id')" \
+    'include "setup"; export_readback($readback; $selection)') || refuse readback_unreadable
+  refused_in "$checked"
+  prepare_state || refuse state_unwritable
+  at=$(now)
+  if [ "$(printf '%s' "$plan" | jqc -r '.configured')" = true ]; then
+    printf '%s' "$plan" | jqc -c --arg agent "$agent" --arg at "$at" \
+      '{format: "world-capture-export/0.1", agent: $agent, selection_id, entry, started_at: $at, done_at: null}' >"$work/export.json" \
+      && mv -f "$work/export.json" "$home/export.json" || refuse state_unwritable
+    # 新的一次：上一次回退存的检查点不再是「改之前」的那份。
+    rm -f "$home/export/source-$chosen.json"
+    printf '%s' "$plan" | jqc -c '.config' >"$work/config.json" && mv -f "$work/config.json" "$home/config.json" || refuse state_unwritable
+  fi
+  # 这一项已经摘掉，不会再起新的一轮；手上那一轮还在跑，等它结束再跑一次。
+  if [ -d "$home/round.lock" ] && ! lock_stale; then refuse round_running; fi
+  done_file=$(raw "$home/delivered/$format.jsonl")
+  results_lines >"$work/results.jsonl"
+  calc=$(jqc -n -c --rawfile checkpoint "$checkpoint" --rawfile delivered "$done_file" --rawfile results "$work/results.jsonl" \
+    --rawfile readback "$2" --argjson plan "$plan" --arg format "$format" \
+    'include "setup"; export_entries($checkpoint; $delivered; $results; $readback; $plan.selection_id; $format)') || refuse failed
+  private_dir "$home/export" || refuse state_unwritable
+  [ -f "$home/export/source-$chosen.json" ] || cp -p "$component/source-$chosen.json" "$home/export/source-$chosen.json" || refuse state_unwritable
+  next="$component/.source-$chosen.json.$$.tmp"
+  printf '%s' "$calc" | jqc -c '.checkpoint' >"$next" && chmod 600 "$next" && mv -f "$next" "$component/source-$chosen.json" \
+    || { rm -f "$next"; refuse component_unwritable; }
+  jqc -c --argjson calc "$calc" --arg at "$at" '.done_at = $at | .added = $calc.added | .pending_cleared = $calc.pending_cleared
+    | .readback = ($calc.readback | length) | .found = $calc.found | .rejudge = $calc.rejudge' "$home/export.json" >"$work/export.json" \
+    && mv -f "$work/export.json" "$home/export.json" || refuse state_unwritable
+  printf '%s' "$calc" | jqc -c --arg agent "$agent" --argjson plan "$plan" '{ok: true, agent: $agent, selection_id: $plan.selection_id, already: false,
+    added, pending_cleared, readback: (.readback | length), found, rejudge}'
+  exit 0
+}
+
+# results/ 里每个文件一行。
+results_lines() {
+  [ -d "$home/results" ] || return 0
+  # 每个文件单独交给 jq：一个读不出的文件只跳过它自己。
+  find "$home/results" -type f -name '*.json' -exec "$JQ" -c . {} \; 2>/dev/null
+}
+
 case "$command" in
   check) setup_check ;;
   enable) setup_enable "${2:-}" ;;
   import) setup_import "${2:-}" ;;
+  export) setup_export "${2:-}" "${3:-}" ;;
 esac
 
 if [ "$mode" = worker ]; then

@@ -1,11 +1,11 @@
 # world-capture 插件
 
-工程包版本：0.1.1。本机采集：Claude Code、Codex 的会话每轮结束时，钩子只读这个会话新增的记录，把条目放进本机队列；攒够了在后台起一轮只带 world 工具的 Agent 判断，再经 world 插件的连接送进 world。要和 `world` 插件一起装：后台那一轮用它的连接（和它的登录），判断规则取它的 `world-source-extract` 技能。
+工程包版本：0.1.6。本机采集：Claude Code、Codex 的会话每轮结束时，钩子只读这个会话新增的记录，把条目放进本机队列；攒够了在后台起一轮只带 world 工具的 Agent 判断，再经 world 插件的连接送进 world。要和 `world` 插件一起装：后台那一轮用它的连接（和它的登录），判断规则取它的 `world-source-extract` 技能。
 
 拆成单独的插件，是因为 Codex 在插件里任何一个文件变了以后都要本人重新信任一次钩子；`world` 经常发版，采集逻辑很少变。
 
 - `hooks/claude.json`、`hooks/codex.json`：会话开始（新开或恢复）、每轮结束、会话结束三个钩子。
-- `hooks/capture.sh`：macOS 15 及以上，只用系统的 `/bin/sh`、`/usr/bin/jq`、`/usr/bin/openssl`。读取规则在 `hooks/capture.jq`，后台轮的数据部分在 `hooks/round.jq`，「开始采集」与迁移的三个子命令的规则在 `hooks/setup.jq`。
+- `hooks/capture.sh`：macOS 15 及以上，只用系统的 `/bin/sh`、`/usr/bin/jq`、`/usr/bin/openssl`。读取规则在 `hooks/capture.jq`，后台轮的数据部分在 `hooks/round.jq`，「开始采集」、迁移与回退的四个子命令的规则在 `hooks/setup.jq`。
 - `hooks/capture.ps1`：Windows PowerShell 5.1（`powershell.exe`），JSON 用 .NET 的 `JavaScriptSerializer`，SHA-256 用 .NET。文件带 UTF-8 BOM，注释以外只有 ASCII。
 - `hooks/round-prompt.md`：后台轮的提示词。
 
@@ -27,9 +27,11 @@ capture.sh  <claude|codex> <事件>   # 钩子：stdin 是钩子的 JSON：sessi
 capture.ps1 <claude|codex> <事件>
 capture.sh  <check|enable|import> <claude|codex> [选择记录文件]   # 「开始采集」那次对话里的 Agent 调用
 capture.ps1 <check|enable|import> <claude|codex> [选择记录文件]
+capture.sh  export <claude|codex> [选择记录文件 读回记录文件]      # 回退到组件时调用
+capture.ps1 export <claude|codex> [选择记录文件 读回记录文件]
 ```
 
-钩子只读 stdin 里的 `transcript_path`，事件取命令行参数。任何情况下退出码都是 0，标准输出和标准错误都不写：Agent 会解析钩子的标准输出，Stop 钩子输出 `{"decision":"block"}` 会拦住会话。三个子命令见「开始采集与迁移」。
+钩子只读 stdin 里的 `transcript_path`，事件取命令行参数。任何情况下退出码都是 0，标准输出和标准错误都不写：Agent 会解析钩子的标准输出，Stop 钩子输出 `{"decision":"block"}` 会拦住会话。四个子命令见「开始采集与迁移」「回退到组件」。
 
 以下情况直接退出，什么都不写：
 
@@ -60,14 +62,16 @@ capture.ps1 <check|enable|import> <claude|codex> [选择记录文件]
 
 | 路径 | 内容 | 谁写 |
 | --- | --- | --- |
-| `config.json` | 见下文 | `enable`、`import` 子命令 |
+| `config.json` | 见下文 | `enable`、`import`、`export` 子命令 |
 | `import.json` | 迁移那一次的结果，见「开始采集与迁移」 | `import` 子命令 |
+| `export.json`、`export/` | 回退那一次的记录，和改之前的组件检查点，见「回退到组件」 | `export` 子命令 |
 | `paused.json` | `reason`、`first_seen_at`、`last_seen_at`：后台轮暂停的原因，现在只有 `component_capturing`（组件正在采集）。原因不在了，下一次钩子删掉它 | 启动脚本 |
 | `transcripts/<sha256(路径)>.json` | 位置文件，见下文 | 启动脚本 |
 | `queue/<格式>/<item_id>@<item_version>.json` | 待提炼条目，见下文。格式里的 `/` 原样成为一层目录，例如 `queue/claude-session-jsonl/1/` | 启动脚本 |
 | `results/<item_id>@<item_version>.json` | 后台轮给这一条的判断，送出前落盘，见「后台轮」 | 持锁的启动脚本 |
 | `delivered/<格式>.jsonl` | 已收到 world 回执或已判为无增量的条目，每行一个 JSON 对象：`item_id`、`item_version`、`import_id`、`status`、`round_id`、`at`，见「后台轮」。读增量时只认前两项 | 持锁的启动脚本 |
 | `rounds/<round_id>.json` | 每一轮的经过，见「后台轮」。只留最近 400 份 | 持锁的启动脚本 |
+| `world-tools.json` | Claude Code 的后台调用见过的 world 工具名（不带前缀），用来关掉每次用不到的，见「后台轮」。删了也行，下一次调用重新学 | 持锁的启动脚本 |
 | `round.lock/` | 目录，里面的 `owner` 记着持锁进程的 `pid`、`round_id`、`started_at`。一轮结束就删 | 持锁的启动脚本 |
 | `work/` | 后台轮里 CLI 的工作目录，一直是空的 | 持锁的启动脚本 |
 | `unsupported.json` | `reason`、`system`、`os_version`、`first_seen_at`、`last_seen_at`。机器恢复支持后，下一次钩子删掉它 | 启动脚本 |
@@ -153,8 +157,11 @@ Claude Code：
 
 ```sh
 claude -p --no-session-persistence --setting-sources "" --plugin-dir <world 插件的 installPath> --tools "" \
-  --allowedTools <这次的工具全名，逗号分隔> --permission-mode dontAsk --output-format stream-json --verbose --model sonnet
+  --allowedTools <这次的工具全名，逗号分隔> [--disallowedTools <这次用不到的 world 工具全名，逗号分隔>] \
+  --permission-mode dontAsk --output-format stream-json --verbose --model sonnet
 ```
+
+`--allowedTools` 只管免确认：world 连接上的六十来个工具（schema 约 70 KB）照样每次请求都带给模型。`--disallowedTools` 才把工具从模型看到的里拿掉（CLI 说明）。world 有哪些工具从各次调用 `init` 事件的 `tools` 学来，并进状态目录的 `world-tools.json`；第一次调用还没学到，全带着；world 以后新加的工具在被学到之前也照样带着，只是多花一点。
 
 `installPath` 每次从 `~/.claude/plugins/installed_plugins.json` 的 `world@tkos-world` 取（用户级优先），升级后目录会变。工具全名是 `mcp__plugin_world_world__<工具>`。`claude -p` 每次在 `~/.claude/projects` 下按 `work/` 留一个目录：里面是空的 `memory/`，工具返回超过约 50 KB 时还有 `<会话 id>/tool-results/` 下存的完整返回（`--no-session-persistence` 也存）。这个目录只属于后台轮，每次调用后删掉存下的工具返回，再删空目录，别的文件不动。返回超过约 50 KB 时模型只看到一句「已存到文件」，启动脚本照样从事件流的 `tool_use_result` 读完整的回执。
 
@@ -176,14 +183,14 @@ codex exec --ephemeral --ignore-user-config --skip-git-repo-check --sandbox read
 一轮的步骤，每一步都按已有状态推，中途断了重跑结果相同：
 
 1. 已判为 null 还没记进 `delivered/` 的记上；`results/` 里条目已不在待提炼的、已记进 `delivered/` 却还留着的队列文件，删掉。
-2. 判断：没有判断、或上次被 world 拒了要重判的条目，按入队先后排成最多 5 批、每批最多 20 条（原文合计超过 60000 字就少放几条；一条超过 8000 字时只交头 6000 字和尾 2000 字）。每批一次判断调用。只有这次调用里真的读到了生效的选择（`selection_id`、`selection_version` 都对得上、`status` 为 `active`）和非空的目标，才收它的判断：world 连不上时模型照样会交一份全是 null 的结果。合规的判断写进 `results/`（已有的不覆盖），对不上这一批 `item_id`、`item_version` 的、重复的、没交 `result` 的记进这一轮的 `mismatches`，漏判的条目留在队列。字段不合规（多了字段、越界、格式不对）的算被 world 拒了一次（`invalid_increment`）。
+2. 判断：没有判断、或上次被 world 拒了要重判的条目，按入队先后排成最多 5 批、每批最多 100 条（原文合计超过 60000 字就少放几条；一条超过 8000 字时只交头 6000 字和尾 2000 字）。每批一次判断调用。批内每条用短编号 `key`（`"1"` 起）代替 `item_id`、`item_version`（各 64 位十六进制），模型按 `key` 交回，启动脚本再对回条目。提示词让模型在同一次回复里同时调两个读工具，少一次请求。只有这次调用里真的读到了生效的选择（`selection_id`、`selection_version` 都对得上、`status` 为 `active`）和非空的目标，才收它的判断：world 连不上时模型照样会交一份全是 null 的结果。合规的判断写进 `results/`（已有的不覆盖），`key` 对不上这一批的、重复的、没交 `result` 的记进这一轮的 `mismatches`，漏判的条目留在队列。字段不合规（多了字段、越界、格式不对）的算被 world 拒了一次（`invalid_increment`）。
 3. 判为 null 的记进 `delivered/`（`status` 为 `null`），再删队列文件和 `results/`。
 4. 送出：已有判断（非 null）的条目，按每份 50 条拼成骨架：`selection_id`、`selection_version`、`source_id`、`batch_id`、`snapshot_version`、`source_ready_at`（这一份里最晚的上报时刻）和每条的 `item_id`、`item_version`、`locator` 都是启动脚本填的，模型只交判断字段。一轮最多 5 份，一次送出调用。
    - 收到回执的记进 `delivered/`（`status` 为 `imported`，带 `import_id`），再删队列文件和 `results/`。模型交给工具的参数和骨架不一致、world 也收下了的，照回执记，另记 `copy_mismatch`。
    - 422 `SOURCE_ITEMS_REJECTED`：一份骨架在一个事务里，整份不进。被点名的条目带着拒绝的 code 留到下一轮重判；同一条判过两次还被拒，就当 null（`status` 为 `dropped`）。没被点名的原样留到下一轮重送。这一轮不再送第二次。
    - `IDEMPOTENCY_CONFLICT`：这个版本 world 已经收过另一份内容，报错不说是哪一条，整份骨架标上 `conflict`。下一轮的送出调用先用 `world_app_sources_imports` 翻页读回（每页 10 条、最多 20 页：页太大时模型只看到「已存到文件」，看不到 `next_cursor`），找到的记进 `delivered/`（`status` 为 `conflict`，带 world 那边的 `import_id`），读完没找到的去掉标记照常重送。
    - 没收到回执的（调用失败、中途断了）留在队列，下一轮用 `results/` 里落盘的那一份原样重送；内容逐字相同时 world 返回原导入，不会收两次。
-5. 回执：用 `world_app_sources_report_run` 报这一轮：还有积压时 `coverage_status` 为 `partial`、`coverage_code` 为 `coverage_incomplete`、一条 `extraction_pending` 缺口，`pending_count` 是积压条数，`pending` 列出最早的 200 条；没有积压时是 `ready`。`request_key` 是 `run-<round_id>`。
+5. 回执：用 `world_app_sources_report_run` 报这一轮：还有积压时 `coverage_status` 为 `partial`、`coverage_code` 为 `coverage_incomplete`、一条 `extraction_pending` 缺口，`pending_count` 是积压条数，`pending` 只列出最早的 20 条（服务端要求有积压时至少列一条、最多 200 条，条数照实报；原来列 200 条，模型要逐条照抄两个 64 位十六进制，一次回执约 2.3 万输出 token）；没有积压时是 `ready`。`request_key` 是 `run-<round_id>`。
 
 ### results/
 
@@ -195,7 +202,7 @@ codex exec --ephemeral --ignore-user-config --skip-git-repo-check --sandbox read
 
 ### rounds/
 
-`round_id`（`<UTC 时刻>-<随机>`）、`agent`、`format`、`trigger`（`session_end` 或 `waited`）、`started_at`、`finished_at`、`taken`（判断了几条）、`accepted`（收到回执几条）、`nulls`、`rejected`、`calls`（每次调用的种类、退出码、秒数、是否超时、失败类别、用量）、`exit_code`（最后一次调用的）、`usage`（合计）、`failure`、`mismatches`、`imports`、`report`（回执交上去没有）、`backlog`。
+`round_id`（`<UTC 时刻>-<随机>`）、`agent`、`format`、`trigger`（`session_end` 或 `waited`）、`started_at`、`finished_at`、`taken`（判断了几条）、`accepted`（收到回执几条）、`nulls`、`rejected`、`calls`（每次调用的种类、退出码、秒数、是否超时、失败类别、用量，以及 Claude Code 的 `visible_tools`：模型看得到几个 world 工具，`requests`：这次调用里模型请求了几次；Codex 这两项是 null）、`exit_code`（最后一次调用的）、`usage`（合计）、`failure`、`mismatches`、`imports`、`report`（回执交上去没有）、`backlog`。
 
 ### 失败
 
@@ -245,6 +252,37 @@ codex exec --ephemeral --ignore-user-config --skip-git-repo-check --sandbox read
 
 组件的待提炼条目不存原文，只能从会话文件重读；Codex 的会话被压成 `.jsonl.zst` 或挪进 `archived_sessions` 以后插件读不到，这样的条目也记为覆盖缺口。
 
+## 回退到组件
+
+**`export <Agent> [<选择记录文件> <读回记录文件>]`**：迁移的反方向，插件出了问题、要退回 World Capture 组件时用；做法与前后步骤见 `docs/world-capture-rollback.md`。把插件已处理的条目写进组件检查点 `source-<选择>.json` 的 `progress.entries`，置空它没收尾的送出计划 `pending`，组件之后不再重判、重送这些条目。组件目录只改检查点这一个文件，改之前的原样存进 `export/source-<选择>.json`（已有就不覆盖）；`format`、`source_hash`、`progress.context_hash`、`progress.files` 原样不动。
+
+不带文件时只看，什么都不写：交回 `dry_run: true`、`configured`（`config.json` 里还有没有这种 Agent 的合用项）、`round_running`、`added`（不含读回会找到的）、`pending_cleared`、`readback`（要读回的条目，`item_id`、`item_version`）、`rejudge`（只数等重判的；读回没找到的，做的时候再加上）。
+
+要过的关，按顺序，不过就拒绝、什么都不写：
+
+| `reason` | 情况 |
+| --- | --- |
+| `selection_file_missing`、`readback_file_missing` | 给了选择记录却没给读回记录，或文件不在 |
+| `component_missing`、`component_running`、`component_settings_unreadable`、`component_format_mismatch`、`component_no_selection`、`component_capture_enabled` | 同 `import` |
+| `config_unreadable`、`device_mismatch` | 同 `import` |
+| `export_record_unreadable` | `export.json` 在、却读不出 |
+| `not_migrated` | `config.json` 里没有这种 Agent 的合用项，也没有上次做到一半的 `export.json`：只交回迁移来的那一项，不要先手工摘掉它 |
+| `selection_mismatch` | 那一项、选择记录不是组件的那项选择 |
+| `checkpoint_unreadable`、`checkpoint_without_progress` | 组件检查点不在、读不出，或还没有进度 |
+| `selection_not_active`、`selection_version_changed` 及 `import` 的其余选择关 | 选择记录不再生效，或版本和那一项记的不同（组件检查点按选择版本认人） |
+| `readback_unreadable`、`readback_mismatch`、`readback_incomplete` | 读回记录不是 `{selection_id, complete, imports: [...]}`、不是这项选择的，或 `complete` 不是 true |
+
+读回记录由 Agent 写：用 `world_app_sources_imports`（`selection_id` 填这项选择）翻完所有页，把每页的 `items` 接起来放进 `imports`，翻完才写 `complete: true`。只用每项的 `selection_id`、`source_item_id`、`source_version`。
+
+过了关，按顺序：
+
+1. 这种 Agent 在 `config.json` 里还有合用项时，先在 `export.json` 记下它（`format` 为 `world-capture-export/0.1`、`agent`、`selection_id`、`entry`、`started_at`、`done_at: null`），再从 `config.json` 摘掉它，别的 Agent 的项和 `device_id` 留着。从这时起钩子不读这种 Agent 的会话、不起后台轮。
+2. `round.lock/` 在、又不比硬时限老 10 分钟以上：拒绝 `round_running`。从这一步起的拒绝（`round_running`、`state_unwritable`、`component_unwritable`、`failed`）都已经做过第 1 步，等原因过去再跑一次，按 `export.json` 接着做；在这之前的拒绝什么都没写。新的一次在第 1 步还删掉上一次回退存的 `export/source-<选择>.json`，它已经不是这一次「改之前」的那份。
+3. 算要写进 `entries` 的条目：`delivered/<格式>.jsonl` 的每一行（各种 `status`）；`results/` 里还没进 `delivered/` 的，判为 null 的记上，判了非 null 的看读回记录，world 里有这个版本的记上，没有的留给组件重判（`rejudge`），等重判的（没有 `result`）也留给组件。插件的判断不交给组件：判得早的到组件送出时目标可能已经变了，模型抄错骨架、world 照收的那份也可能和落盘的不同，原样再送会被拒或冲突，组件碰到这两种都会停住。同一个 `item_id` 有几个版本时取时刻最晚的（`delivered/` 按 `at`，`results/` 按 `judged_at`，相同时取 `delivered/` 的）；`entries` 里已有、值不同的，用插件的。`results/` 里读不出的文件只跳过它自己。留给组件重判的条目里，迁移时从组件带过来的那种（`round_id` 为 `import`），组件的待提炼文件里还存着它当初交回的结果，组件会原样再送、不重判；export 不改待提炼文件。
+4. 存一份改之前的检查点，写新的检查点（临时文件再改名），在 `export.json` 记上 `done_at` 和下面几个数。
+
+成功时交回 `ok`、`agent`、`selection_id`、`already: false`、`added`（`entries` 里新增或改了的条数）、`pending_cleared`、`readback`、`found`（读回找到的）、`rejudge`。做完以后再跑（`config.json` 里没有这种 Agent 的合用项、`export.json` 有 `done_at`），交回 `already: true`，什么都不改；只有组件检查点又和 `export/` 里存的那份相同时（本人从备份恢复了组件目录）才再做一次。之后要切回插件，照迁移再跑一次 `import`：它把这一项写回 `config.json`，再退回就是新的一次 `export`。`results/` 和 `queue/` 不随 export 交出去，切回以后插件会照旧送它回退前判的那几条；world 拒了的照「后台轮」重判，报冲突的读回。
+
 ## 参数
 
 | 参数 | 值 | 理由 |
@@ -253,7 +291,8 @@ codex exec --ephemeral --ignore-user-config --skip-git-repo-check --sandbox read
 | 起轮的等待 | 30 分钟 | 与现在的自动整理相同 |
 | 临时目录残留 | 超过一天删掉 | 正常运行结束时就删了，残留只来自中途被杀的运行 |
 | `first_seen_at` 的精度 | 秒 | `date -u` 只到秒，两份脚本写同一种格式 |
-| 每批、每轮 | 20 条一批、5 批一轮 | 与原来的自动整理相同 |
+| 每批、每轮 | 100 条一批、5 批一轮 | 原来是 20 条一批（同组件）。每次判断调用都固定带着系统提示和工具 schema，按请求次数重复计；本人队列（11/17，2375 条）原文中位数 113 字、平均约 480 字，20 条一批原文只有几千字，固定部分占了大头。一批原文合计仍不超过 60000 字 |
+| 回执的积压清单 | 最早 20 条，条数照实报 | 要求 world 服务已允许清单只列一部分（有积压时至少列一条）；旧服务端要求列满 `min(积压, 200)` 条，会对回执报 422，所以先部署服务、再发这一版插件 |
 | 两轮的间隔 | 30 分钟，连续失败翻倍，最长 4 小时 | 与原来的自动整理相同 |
 | 一轮的硬时限 | 20 分钟 | 估计的一轮最长约 15 分钟：判断 5 批各一两分钟、送出与回执各一两分钟；锁再宽 10 分钟 |
 | 被拒后重判 | 最多判两次 | 第二次还被拒就当 null，不一直重判 |

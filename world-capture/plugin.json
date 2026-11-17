@@ -1,6 +1,6 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "world-capture",
-  "version": "0.1.1",
+  "version": "0.1.6",
   "description": "本机采集：会话每轮结束时读本会话新增的记录，攒够后在后台起一轮只带 world 工具的 Agent，判断后经 world 连接送出。要和 world 插件一起装。"
 }

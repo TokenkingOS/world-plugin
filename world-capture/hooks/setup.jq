@@ -1,4 +1,4 @@
-# capture.sh 的「开始采集」与迁移：check、enable、import 三个子命令的纯函数部分。文件读写在 capture.sh；
+# capture.sh 的「开始采集」、迁移与回退：check、enable、import、export 四个子命令的纯函数部分。文件读写在 capture.sh；
 # capture.ps1 里是同一套规则的 PowerShell 写法。选择记录是 world_app_sources_select / _read 交回的 selection；
 # 组件的 settings.json、source-<选择>.json、extraction-<选择>.json 的格式照 packages/world-capture-host 和库。
 include "capture";
@@ -134,3 +134,79 @@ def import_missing($extractionRaw; $queuedRaw; $deliveredRaw):
   | ($extractionRaw | parsed) as $ex
   | [(($ex | field("pending") // []) + ($ex | field("results") // []))[] | select(type == "object" and well_formed_item)
       | select(($queued[item_name] | not) and ($done[item_name] | not)) | {item_id, item_version}] | unique_by(item_name);
+
+# export：迁移的反方向（回退到组件，见 docs/world-capture-rollback.md）。把插件已处理的条目写进组件检查点的 progress.entries，
+# 置空组件没收尾的送出计划；组件之后不再重判、重送它们。组件目录只改检查点这一个文件。
+def export_record_ok($agent; $selection): type == "object" and .format == "world-capture-export/0.1" and .agent == $agent and .selection_id == $selection;
+
+# 交出 {refused}、{already} 或这次要用的几项。起点是 config.json 里这种 Agent 合用的那一项（迁移写的）；上次跑到一半、
+# 这一项已经摘掉时，用 export.json 记下的那一项接着做。config.json 里又有了合用项（切回插件以后再退回），就是新的一次。
+# 做完了（export.json 有 done_at）只在组件检查点又和改之前存的那份相同时（本人从备份恢复了组件目录）才再做一次。
+def export_plan($agent; $format; $configRaw; $settingsRaw; $recordRaw; $checkpointRaw; $backupRaw):
+  ($configRaw | parsed) as $config | ($settingsRaw | parsed | component_settings) as $s | ($recordRaw | parsed) as $rec
+  | ($checkpointRaw | parsed) as $cp | ($backupRaw | parsed) as $backup
+  | ([$config | config_entry($agent; $format)] | length == 1) as $configured
+  | if $s == null then {refused: "component_settings_unreadable"}
+    elif $s.source_format != $format then {refused: "component_format_mismatch"}
+    elif $s.selection_id == null then {refused: "component_no_selection"}
+    elif $s.capture_enabled then {refused: "component_capture_enabled"}
+    elif $config != null and ($config | type) != "object" then {refused: "config_unreadable"}
+    elif ($config | config_device) != null and $config.device_id != $s.device_id then {refused: "device_mismatch"}
+    elif $rec != null and ($rec | type) != "object" then {refused: "export_record_unreadable"}
+    else ($rec != null and ($rec | export_record_ok($agent; $s.selection_id))) as $resume
+      | if ($configured | not) and $resume and $rec.done_at != null and ($backup == null or $backup != $cp) then {already: true, selection_id: $s.selection_id}
+        else (if $configured then $config.agents[$agent] elif $resume then $rec.entry else null end) as $entry
+          | if $entry == null then {refused: "not_migrated"}
+            elif ($entry | field("selection_id")) != $s.selection_id then {refused: "selection_mismatch"}
+            elif $cp == null or ($cp | checkpoint_ok | not) then {refused: "checkpoint_unreadable"}
+            elif $cp.progress == null then {refused: "checkpoint_without_progress"}
+            else {already: false, selection_id: $s.selection_id, device_id: $s.device_id, root: $s.root, entry: $entry, configured: $configured,
+              config: (if $configured then ($config | .agents |= del(.[$agent])) else null end)} end end end;
+
+# 选择记录（world_app_sources_read 交回的）：要仍是这一项、仍生效、版本没变（组件检查点按选择版本认人）。
+def export_selection($agent; $format; $plan; $selectionRaw):
+  ($selectionRaw | parsed) as $sel
+  | if ($sel | field("selection_id")) != $plan.selection_id then {refused: "selection_mismatch"}
+    else ($sel | selection_entry($agent; $format; "component_window"; $plan.device_id; $plan.root)) as $r
+      | if $r.refused then {refused: $r.refused}
+        elif $r.entry.selection_version != $plan.entry.selection_version then {refused: "selection_version_changed"}
+        else {} end end;
+
+# 读回记录：Agent 用 world_app_sources_imports（按这项选择）翻完所有页后写的 {selection_id, complete: true, imports: [...]}。
+def export_readback($readbackRaw; $selection):
+  ($readbackRaw | parsed) as $rb
+  | if ($rb | type) != "object" or ($rb.imports | type) != "array" then {refused: "readback_unreadable"}
+    elif $rb.selection_id != $selection then {refused: "readback_mismatch"}
+    elif $rb.complete != true then {refused: "readback_incomplete"}
+    else {} end;
+
+# 要写进组件检查点的条目。$resultsRaw 是 results/ 里每个文件一行。交出新的检查点、要读回的条目和几个数。
+#  - delivered/ 的每一行（各种 status）；
+#  - results/ 里判为 null、还没记进 delivered/ 的：同组件自己判为无增量时一样记上；
+#  - results/ 里判了非 null、还没记进 delivered/ 的：可能已送出却没收到回执，要读回；world 里有的记上，没有的留给组件重判；
+#  - results/ 里等重判的（没有 result）：world 没收过，留给组件重判。
+# 同一个 item_id 有几个版本时取时刻最晚的（delivered/ 按 at，results/ 按 judged_at；时刻相同取 delivered/ 的）。
+def export_entries($checkpointRaw; $deliveredRaw; $resultsRaw; $readbackRaw; $selection; $format):
+  ($checkpointRaw | parsed) as $cp
+  | [$deliveredRaw | split("\n")[] | (try fromjson catch null) | select(type == "object" and well_formed_item)] as $lines
+  | ($lines | map({(item_name): true}) | add // {}) as $done
+  | [$resultsRaw | split("\n")[] | (try fromjson catch null)
+      | select(type == "object" and .format == $format and well_formed_item) | select($done[item_name] | not)] | unique_by(item_name) as $open
+  | ($readbackRaw | parsed) as $rb
+  | (if ($rb | type) == "object" and ($rb.imports | type) == "array" then
+      [$rb.imports[] | select(type == "object" and .selection_id == $selection and (.source_item_id | type) == "string" and (.source_version | type) == "string")
+        | {("\(.source_item_id)@\(.source_version)"): true}] | add // {} else {} end) as $world
+  | ($open | map(select(has("result") and .result == null))) as $nulls
+  | ($open | map(select(has("result") and .result != null))) as $sent
+  | ($sent | map(select($world[item_name]))) as $found
+  | def when($k): .[$k] | if type == "string" then . else "" end;
+    ([($nulls + $found)[] | {item_id, item_version, t: when("judged_at")}] + [$lines[] | {item_id, item_version, t: when("at")}]
+      | group_by(.item_id) | map(max_by(.t) | {(.item_id): .item_version}) | add // {}) as $add
+  | ($cp.progress.entries) as $before
+  | {checkpoint: ($cp | .progress.entries = ($before + $add) | .pending = null),
+     added: ([$add | to_entries[] | select($before[.key] != .value)] | length),
+     pending_cleared: ($cp.pending != null),
+     readback: [$sent[] | {item_id, item_version}],
+     found: ($found | length),
+     unjudged: ($open | map(select(has("result") | not)) | length),
+     rejudge: (($open | length) - ($nulls | length) - ($found | length))};

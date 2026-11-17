@@ -5,9 +5,13 @@ include "capture";
 def CLAUDE_PREFIX: "mcp__plugin_world_world__";
 def TOOLS: {judge: ["world_app_sources_read", "world_app_sources_targets"],
   send: ["world_app_sources_ingest", "world_app_sources_imports"], report: ["world_app_sources_report_run"]};
-# 一轮最多 5 批、每批 20 条（同组件）；每条原文最多交 8000 字，一批原文合计最多 60000 字，超了这一批就少放几条。
+# 一轮最多 5 批、每批 100 条；每条原文最多交 8000 字，一批原文合计最多 60000 字，超了这一批就少放几条。
+# 每次调用都带着 Claude Code 的系统提示和工具 schema，一批的原文反倒不多（本人队列中位数 113 字、平均约 480 字），
+# 所以按条数多放：原来每批 20 条，一批原文才几千字，固定部分占了大头。
 # 读回导入每页 10 条：一页太大时 Claude Code 只给模型看一句「输出太大、已存到文件」（约 50 KB 起，实测），模型就看不到 next_cursor 翻不了页。
-def LIMITS: {batches: 5, batch: 20, item_chars: 8000, batch_chars: 60000, increment: 50, increments: 5, readback_pages: 20, readback_page: 10, pending: 200};
+def LIMITS: {batches: 5, batch: 100, item_chars: 8000, batch_chars: 60000, increment: 50, increments: 5, readback_pages: 20, readback_page: 10, pending: 20};
+# 回执的积压清单只列最早的 20 条，条数照实报（要求 world 服务已允许清单只列一部分，有积压时至少一条）：原来列 200 条，模型逐条照抄两个 64 位十六进制，
+# 本人 Mac 实测一次回执约 2.3 万输出 token、285 秒。
 def ITEM_FIELDS: ["classification", "target_ref", "field_key", "value", "quote", "occurred_at", "links", "source_event_ref", "constraint"];
 
 def name: "\(.item_id)@\(.item_version)";
@@ -120,9 +124,11 @@ def since($batch): $batch | map(.reported_at[0:19] + "Z" | fromdateiso8601) | mi
 
 def code_block: "```json\n" + tojson + "\n```";
 
+# 批内每条用短编号 key（"1" 起）代替 item_id、item_version：两个都是 64 位十六进制，模型要读一遍、答的时候再抄一遍。
 def judge_prompt($template; $rules; $config; $batch):
   ($template | fill({rules: $rules, batch: ({selection_id: $config.selection_id, selection_version: $config.selection_version,
-     since: since($batch), items: [$batch[] | del(.name, .attempt)]} | code_block)})) + "\n";
+     since: since($batch), items: [$batch | to_entries[] | {key: (.key + 1 | tostring)} + (.value | del(.name, .attempt, .item_id, .item_version))]}
+     | code_block)})) + "\n";
 
 def send_prompt($template; $readbackStep; $ingestStep; $config; $increments; $readback):
   ([if ($readback | length) > 0 then
@@ -143,7 +149,9 @@ def first_text: if type == "string" then . elif type == "array" then (map(select
 def full_content:
   if type == "object" then (if (.structuredContent | type) == "object" then (.structuredContent | tojson) else .content end) else . end;
 
-# claude -p --output-format stream-json --verbose 的每一行。init 里有 world 连接的状态，result 里有用量与最终答复。
+# claude -p --output-format stream-json --verbose 的每一行。init 里有 world 连接的状态和模型看得到的工具，result 里有用量与最终答复。
+# world_tools 是 init 里列的 world 工具（不带前缀），记下来，之后的调用把用不到的关掉；requests 是这次调用里模型请求的次数
+# （同一次请求的各个内容块 message.id 相同），用来核对用量花在哪。
 def parse_claude:
   (map(select(.type == "system" and .subtype == "init")) | first) as $init
   | (map(select(.type == "result")) | last) as $result
@@ -162,6 +170,9 @@ def parse_claude:
       final: (if ($result.result | type) == "string" then $result.result else null end),
       errors: [if $result.is_error == true then ($result.result // "error" | tostring) else empty end],
       api_status: $result.api_error_status,
+      world_tools: (if $init == null then null
+        else [($init.tools // [])[] | select(type == "string" and startswith(CLAUDE_PREFIX)) | ltrimstr(CLAUDE_PREFIX)] end),
+      requests: ([.[] | select(.type == "assistant") | .message.id | select(type == "string")] | unique | length | if . == 0 then null else . end),
       usage: ($result.usage | if type == "object" then {
           input_tokens: ((.input_tokens // 0) + (.cache_creation_input_tokens // 0) + (.cache_read_input_tokens // 0)),
           cached_input_tokens: (.cache_read_input_tokens // 0), output_tokens: (.output_tokens // 0)} else null end)
@@ -179,6 +190,8 @@ def parse_codex:
     errors: ([.[] | select(.type == "error") | .message] + [.[] | select(.type == "turn.failed") | .error.message]
       + [.[] | select(.type == "item.completed" and .item.type == "error") | .item.message] | map(tostring)),
     api_status: null,
+    world_tools: null,
+    requests: null,
     usage: ([.[] | select(.type == "turn.completed") | .usage] | if length == 0 then null else
       {input_tokens: (map(.input_tokens // 0) | add), cached_input_tokens: (map(.cached_input_tokens // 0) | add),
        output_tokens: (map(.output_tokens // 0) | add)} end)
@@ -222,9 +235,12 @@ def tool_body($tool): [.calls[] | select(.tool == $tool and (.failed | not)) | .
 def tool_error($tool): [.calls[] | select(.tool == $tool) | (.text | body | .error.code // null) // (if .failed then "tool_failed" else null end)] | map(select(. != null)) | last;
 def answer: (.final // "") | (capture("(?<j>\\{[\\s\\S]*\\})") // null) | if . == null then null else (.j | try fromjson catch null) end;
 
+# 答复里的 key 是 judge_prompt 给的编号；模型把它写成数字也认。
+def answer_key: if type == "object" then (.key | if type == "string" then . elif type == "number" then tostring else null end) else null end;
+
 # 只认这一次调用里真的读到了生效的选择和非空的目标：world 连不上时模型照样会交一份全是 null 的结果，不能收。
 def judge_outcome($batch; $config):
-  ($batch | map({(.name): .}) | add) as $by
+  ($batch | to_entries | map({(.key + 1 | tostring): .value}) | add) as $by
   | tool_body("world_app_sources_read").selection as $selection
   | tool_body("world_app_sources_targets").targets as $targets
   | if $selection == null or ($targets | type) != "array" then
@@ -236,14 +252,15 @@ def judge_outcome($batch; $config):
     elif (answer | .results | type) != "array" then {failure: {class: "other", detail: "answer_unreadable"}}
     else answer.results
       | reduce .[] as $r ({failure: null, accepted: [], invalid: [], mismatches: [], seen: {}};
-          (if ($r | type) == "object" then "\($r.item_id)@\($r.item_version)" else "" end) as $key
-          | if $by[$key] == null then .mismatches += [{item_id: ($r.item_id? // null), item_version: ($r.item_version? // null), reason: "not_in_batch"}]
-            elif .seen[$key] then .mismatches += [{item_id: $r.item_id, item_version: $r.item_version, reason: "duplicate"}]
-            elif ($r | has("result") | not) then .mismatches += [{item_id: $r.item_id, item_version: $r.item_version, reason: "no_result"}] | .seen[$key] = true
+          ($r | answer_key // "") as $key
+          | if $by[$key] == null then .mismatches += [{key: ($r | if type == "object" then .key else null end), reason: "not_in_batch"}]
+            elif .seen[$key] then .mismatches += [{key: $key, item_id: $by[$key].item_id, item_version: $by[$key].item_version, reason: "duplicate"}]
+            elif ($r | has("result") | not) then .mismatches += [{key: $key, item_id: $by[$key].item_id, item_version: $by[$key].item_version, reason: "no_result"}]
+              | .seen[$key] = true
             elif $r.result == null then .accepted += [$by[$key] + {result: null}] | .seen[$key] = true
             elif ($r.result | valid_item) then .accepted += [$by[$key] + {result: ($r.result | with_entries(select(.value != null)))}] | .seen[$key] = true
             else .invalid += [$by[$key]] | .seen[$key] = true end)
-      | .unanswered = ([$batch[].name] - (.seen | keys))
+      | .seen as $seen | .unanswered = [$batch | to_entries[] | select($seen[(.key + 1 | tostring)] | not) | .value.name]
       | del(.seen) end;
 
 # ---------- 送出 ----------
@@ -298,6 +315,14 @@ def report_args($config; $round; $started; $finished; $plan; $files; $outcome; $
        elif any($outcome.increments[]?; .error == "SOURCE_ITEMS_REJECTED" or .error == "IDEMPOTENCY_CONFLICT") then "blocked" else "unknown" end),
      import_count: ($ids | length), import_ids: $ids[:1000]};
 
+# ---------- 只给模型看这次要用的 world 工具（Claude Code） ----------
+# --allowedTools 只管免确认，world 连接上的六十来个工具（schema 约 70 KB）照样每次请求都带上；--disallowedTools 才把工具从模型看到的里拿掉。
+# 工具名从各次调用 init 里列的学来（world-tools.json），第一次调用还不知道，就全带着。
+
+def tool_names: if type == "array" then [.[] | select(type == "string" and test("^[A-Za-z0-9_-]{1,128}$"))] else [] end;
+def known_tools($old; $seen): ($old | tool_names) + ($seen | tool_names) | unique;
+def hidden_tools($kind): [tool_names[] | select(IN(TOOLS[$kind][]) | not)] | unique | map(CLAUDE_PREFIX + .) | join(",");
+
 # ---------- 配置与已装的 world 插件 ----------
 
 # config.json 里这种 Agent 合用的那一项（规则同 capture.jq 的 config_entry），交出后台轮要的三项。
@@ -334,3 +359,8 @@ def with_gate($gate; $locked; $component):
        blocked: (if .due | not then null elif $component then "component_capturing" elif $locked then "round_running"
          elif $gate.too_soon then "too_soon" else null end),
        failures: $gate.failures, next_round_at: $gate.next_round_at};
+
+# capture.sh 的 labeled_lines 交出的「文件名\t一行」按文件名拼回去，逐个解析成 {name, value}；读不出的文件只跳过它自己。
+def by_file:
+  split("\n") | map(select(length > 0) | index("\t") as $t | {name: .[:$t], line: .[$t + 1:]}) | group_by(.name)
+  | map({name: .[0].name, value: (map(.line) | join("\n") | fromjson?)});

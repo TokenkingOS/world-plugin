@@ -36,7 +36,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "<插件目录>\hooks\ca
 
 ## 二、目标与公司
 
-- 公司：看得到 `world_get_connection` 就用它说的公司；在 Codex 里它可能看不到（工具多时 Codex 会按名字顺序藏掉排在后面的工具），这时写「你登录 world 时选的公司」，不要猜公司名。
+- 公司：看得到 `world_get_connection` 就报它的 `scope.company_name`（是 null 时才报 `scope.tenant_id`）；在 Codex 里它可能看不到（工具多时 Codex 会按名字顺序藏掉排在后面的工具），这时写「你登录 world 时选的公司」，不要猜公司名。
 - 记到哪些 Task、Mission：看得到 `world_list_objects` 和 `world_get_object` 时，按 `world-connect` 的「查询本人工作」列出本人负责、还没关闭的，本人可以去掉。看不到时，用 `world_app_sources_list` 找本人生效的、`source_id` 以 `local-capture-` 开头的选择，用 `world_app_sources_targets` 读它的目标标题，问本人是否记到同样这些；一项都没有就请本人先在 Claude Code 里开始采集，或给出 Task 链接，用 `world_app_get_task` 核对。一项目标都没有时不准备选择。
 
 ## 三、准备
