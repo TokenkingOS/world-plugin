@@ -86,10 +86,44 @@ round_claude() {
   finish "$status" "$input" "$cached" "$(tokens output_tokens)"
 }
 
+locate_pi() {
+  printf '%s' "${WORLD_CAPTURE_PI:-$(command -v pi 2>/dev/null || true)}"
+}
+
+# pi 没有内置沙箱，这一轮的工具关卡和 sandbox-exec 都在 pi-round.ts 里，-ne 只加载它。其余照 Claude Code 那一轮：空环境、
+# 空临时目录作工作目录、--no-session 不留会话文件、不加载本人的技能、提示词模板、MCP 和上下文文件。PI_CODING_AGENT_DIR
+# 要原样带上，不然认证找不到。用量由扩展在退出时写到本轮目录的 usage.json。
+round_pi() {
+  if [ ! -x "$program" ]; then finish 127; return; fi
+  work=$(mktemp -d) || { finish 1; return; }
+  trap 'rm -rf "$work"; exit 143' TERM INT HUP
+  real=$(cd "$work" && pwd -P) || { rm -rf "$work"; finish 1; return; }
+  (
+    cd "$work" || exit 1
+    {
+      cat "$here/round-prompt.md"
+      printf '\n通道描述文件：%s\n' "$dir/agent-channel.json"
+      printf '本轮只能运行单行 curl，读不了文件；描述文件的内容如下，不用再读：%s\n\n---\n\n' "$(cat "$dir/agent-channel.json")"
+      cat "$here/../skills/world-source-extract/SKILL.md"
+    } | env -i HOME="$HOME" USER="$(id -un)" LOGNAME="$(id -un)" PATH="/usr/bin:/bin:/usr/sbin:/sbin:$(dirname "$program")" \
+      LANG="${LANG:-en_US.UTF-8}" TMPDIR="$real" WORLD_AUTO_EXTRACT_ROUND="$round" \
+      ${PI_CODING_AGENT_DIR:+PI_CODING_AGENT_DIR="$PI_CODING_AGENT_DIR"} \
+      WORLD_ROUND_CAPTURE_DIR="$dir" WORLD_ROUND_WORK_DIR="$real" WORLD_ROUND_BASE_URL="$base" \
+      "$program" -p --no-session -ne -e "$here/pi-round.ts" -ns --no-mcp -nc -np --no-themes --tools world_channel_curl --offline \
+      ${WORLD_CAPTURE_PI_MODEL:+--model "$WORLD_CAPTURE_PI_MODEL"}
+  ) >/dev/null 2>&1
+  status=$?
+  usage=$(cat "$real/usage.json" 2>/dev/null)
+  rm -rf "$work"
+  number() { printf '%s' "$usage" | sed -n "s/.*\"$1\":\\([0-9][0-9]*\\).*/\\1/p"; }
+  finish "$status" "$(number input_tokens)" "$(number cached_input_tokens)" "$(number output_tokens)"
+}
+
 by_agent() {
   case "$1" in
     codex) format=codex-rollout-jsonl/1 locate=locate_codex run_round=round_codex ;;
     claude) format=claude-session-jsonl/1 locate=locate_claude run_round=round_claude ;;
+    pi) format=pi-session-jsonl/1 locate=locate_pi run_round=round_pi ;;
     *) return 1 ;;
   esac
 }

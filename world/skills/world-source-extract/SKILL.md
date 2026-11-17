@@ -3,9 +3,9 @@ name: world-source-extract
 description: 本机 World Capture 组件显示“待提炼”时使用；由原来源 Agent 读取属于自己来源格式的待提炼条目，交回 null 或有限 SourceItem，再核对组件送出的结果。原文留在本机，令牌不经手。
 ---
 
-本技能只在本机 World Capture 组件已启用时有用。组件用自己的 world 连接送出结果；你不取得、不打印组件的 world 令牌，组件也不读你的凭据。建议本人显式调用（Codex `$world-source-extract`，Claude Code `/world:world-source-extract`，其他 Agent `/world-source-extract`），这样这次提炼会话本身不会再被采集成新的待提炼。
+本技能只在本机 World Capture 组件已启用时有用。组件用自己的 world 连接送出结果；你不取得、不打印组件的 world 令牌，组件也不读你的凭据。建议本人显式调用（Codex `$world-source-extract`，Claude Code `/world:world-source-extract`，pi `/skill:world-source-extract`，其他 Agent `/world-source-extract`），这样这次提炼会话本身不会再被采集成新的待提炼。
 
-Codex 或 Claude Code 在 macOS 上装了 world 插件、组件里没关「自动整理」时，待提炼等够 30 分钟或会话结束，插件会在后台另起一轮自动跑本技能（只放行组件目录和本轮临时目录、只连 127.0.0.1，一轮最多 5 批、每批 20 条）；本人不用再手动调用。`/v1/pending` 返回的 `targets[]` 是本人所选 Task/Mission 的当前版本，带着它们的验收条目和近期已记事实，判断标准见「什么值得记」。
+Codex 或 Claude Code 在 macOS 上装了 world 插件（pi 要另把插件的 `hooks/pi.ts` 链接进 `~/.pi/agent/extensions/`）、组件里没关「自动整理」时，待提炼等够 30 分钟或会话结束，插件会在后台另起一轮自动跑本技能（只放行组件目录和本轮临时目录、只连 127.0.0.1，一轮最多 5 批、每批 20 条）；本人不用再手动调用。pi 没装这个扩展时没有后台自动整理，待提炼要本人在 pi 里手动调用 `/skill:world-source-extract`。`/v1/pending` 返回的 `targets[]` 是本人所选 Task/Mission 的当前版本，带着它们的验收条目和近期已记事实，判断标准见「什么值得记」。
 
 ## 只处理自己的格式
 
@@ -13,6 +13,7 @@ Codex 或 Claude Code 在 macOS 上装了 world 插件、组件里没关「自�
 | --- | --- |
 | Codex | `codex-rollout-jsonl/1` |
 | Claude Code | `claude-session-jsonl/1` |
+| pi | `pi-session-jsonl/1` |
 | Grok | `grok-updates-jsonl/1`、`grok-history-jsonl/1` |
 
 先读通道描述文件：macOS `~/Library/Application Support/World Capture/capture/agent-channel.json`，Windows `%APPDATA%\World Capture\capture\agent-channel.json`。取其中 `base_url`、`header_file`、`source_format`。`source_format` 不属于你时停止，告诉本人打开对应的 Agent 处理；不要替其他 Agent 提炼，也不要自己去找会话文件或其他目录。文件不存在或连接被拒绝，表示组件未运行或未启用采集，请本人打开组件并启用；不要重试别的端口，也不要用旧的描述文件或别处记下的端口。

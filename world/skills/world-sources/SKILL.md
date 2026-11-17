@@ -25,6 +25,8 @@ Mission 普通进展以 `target_mission_ids` 单独选择，使用实际读取�
 
 Task/位置必须来自实际读取和可见映射；分类、时间或目标不明时用 unknown/null，不能把处理时刻或文件mtime当工作事实时间。变化由组件及时归位，日终通过 `world_app_sources_runs` 核覆盖、最后完整检查及待办；没有业务增量只送 `world_app_sources_report_run` 运行元数据，不发经营事件/快照。既有空items导入仅保留兼容运行回执；来源不可读、失败和覆盖未知应按原失败报告处理，不能伪装成成功取得的空增量。
 
+本人要让本机 Claude Code、Codex 的会话持续进 world（world-capture 插件，「开始采集 world 进展」），按 `world-capture-start` 办：从确认时刻起，不套七工作日建议。
+
 本机 World Capture 组件的窗口也能完成本机来源选择：本人在窗口里点「确认并开始采集」，组件自己提交，记为 `reported_component_window`。Agent 代交的确认只用 `current_dialogue`，不要替组件声称窗口确认。
 
 本机 World Capture 组件显示“待提炼”时，由原来源 Agent 按 `world-source-extract` 技能在本机交回 null 或有限 SourceItem，组件用它自己的连接送出；不要改用本技能的 ingest 手工另送同一条目。

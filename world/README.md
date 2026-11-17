@@ -1,6 +1,6 @@
 # world 接入包
 
-工程包版本：0.12.4。需要 world 服务 v0.11.0 及以上。0.12.4 起刚登录时看不到 world 的工具，Agent 会先请本人再问一次或新开对话，不再说成服务端缺工具，并写明需要的 world 服务版本；0.12.3 起 Claude Code 里的连接改回 `plugin:world:world`（桌面端连接器显示 World），从 0.12.2 更新后要重新登录一次；0.12.2 曾把 Claude Code 里的连接键改成 `app`，更新后要重新登录一次；0.12.1 只改了措辞，行为不变。0.12.0 起带 `world-ask`（问事）和 `world-daily`（写日报，收集会话的脚本随包带），本人动作支持登记、撤销委托，老入口 2026-11-20 下线；0.11.2 起 Claude Code 也能后台自动整理待提炼（macOS），整理技能只记对得上目标验收条目的事；各技能写明服务忙（503 `SERVICE_BUSY`）时怎么等、怎么重放，与证据存储不可用分开；0.11.0 起有本机采集组件的“原来源 Agent 在线提炼”技能，组件安装、登录与真实运行另行验收。
+工程包版本：0.12.5。需要 world 服务 v0.12.3 及以上。0.12.5 起登录页可以「用飞书登录」，邮箱和密码照旧能用，飞书第一次对不上 world 账号时把页面给的 `union_id` 交给管理员；world 服务 v0.12.3 起 Codex 里能看到 world 的全部工具（之前只看得到一部分，基础工具和提交、核对类的看不到）。0.12.4 起刚登录时看不到 world 的工具，Agent 会先请本人再问一次或新开对话，不再说成服务端缺工具，并写明需要的 world 服务版本；0.12.3 起 Claude Code 里的连接改回 `plugin:world:world`（桌面端连接器显示 World），从 0.12.2 更新后要重新登录一次；0.12.2 曾把 Claude Code 里的连接键改成 `app`，更新后要重新登录一次；0.12.1 只改了措辞，行为不变。0.12.0 起带 `world-ask`（问事）和 `world-daily`（写日报，收集会话的脚本随包带），本人动作支持登记、撤销委托，老入口 2026-11-20 下线；0.11.2 起 Claude Code 也能后台自动整理待提炼（macOS），整理技能只记对得上目标验收条目的事；各技能写明服务忙（503 `SERVICE_BUSY`）时怎么等、怎么重放，与证据存储不可用分开；0.11.0 起有本机采集组件的“原来源 Agent 在线提炼”技能，组件安装、登录与真实运行另行验收。
 
 本包提供远程连接、身份与能力核对、工作查询与普通事实记录，以及获准工作来源归位、对话内单项 Task 修改、本人门、创建/指派、生命周期操作和委托登记与撤销。使用既有 world 账号，问事、记事、办门不需要安装 Python、配置环境变量或维护脚本；用 `world-daily` 写日报和日终查漏要本机有 Python。
 
@@ -11,7 +11,7 @@
 - Claude Code：运行 `claude plugin install world --marketplace TokenkingOS/world-plugin`，再运行 `claude mcp login plugin:world:world` 完成 world 的 OAuth 登录（会打开浏览器），也可在 MCP 管理界面登录。
 - Grok 或其他兼容 Agent 可在其 MCP 连接/登录界面使用同一地址。标准连接能力开放；本包未声明 Grok 支持与 Codex/Claude 相同的插件安装格式。
 
-本人在登录页填写账号，选择公司后回到对话，问「核对 world 的身份和可用能力，再看我负责的工作」。先确认显示的是本人及正确范围。刚登录的那个对话里，Agent 可能还看不到 world 的工具：再问一次，不行就新开一个对话；不要据此认定服务端缺工具。
+本人在登录页点「用飞书登录」或填写邮箱和密码，选择公司后回到对话，问「核对 world 的身份和可用能力，再看我负责的工作」。先确认显示的是本人及正确范围。刚登录的那个对话里，Agent 可能还看不到 world 的工具：再问一次，不行就新开一个对话；不要据此认定服务端缺工具。
 
 记录普通事实时会先准备准确请求，再经原记录工具提交，并分别读回回执和事件。修改 Task 或办理本人动作时，先展示准确一项及其版本、来源、参数、影响和所需角色，明确确认后提交并核对真实业务状态。动作以支持清单为准，含登记与撤销委托，不含凭证或身份管理。
 
@@ -39,9 +39,20 @@
 
 可直接问「这些来源覆盖到哪里、卡在哪、各阶段用了多久」。`world-source-status` 使用只读来源查询，区分真实历史、当前字段/依据、具体待本人事项与恢复职责；五分钟和一分钟只按试点目标分别报告成功、受阻、超时和未知，不宣称生产 SLA。
 
-本机 World Capture 组件显示“待提炼”时，可在对应 Agent 中显式调用 `world-source-extract`（Codex `$world-source-extract`，Claude Code `/world:world-source-extract`）。Agent 只处理自己格式的条目，经本机通道交回 null 或有限结果，组件用自己的连接送出；Agent 全部关闭时保持待提炼并显示覆盖缺口。
+**本机采集（world-capture 插件）。** 和本包一起装上 world-capture 插件以后，在 Claude Code 或 Codex 里说「开始采集 world 进展」，按 `world-capture-start` 办：先核这台机器能不能采（Mac 要 macOS 15 及以上和系统自带的 `jq`），再用 `world_app_sources_prepare` 准备，列出读哪个文件夹（只写文件夹名）、从确认时刻起、送到哪个公司、记到哪些 Task 和 Mission，本人在对话里明确同意后 `world_app_sources_select`，再由 world-capture 的脚本写本机配置。每种 Agent、每台设备一项选择，不回补确认之前的会话。用过 World Capture 组件的，同一技能沿用组件那项选择、接过它的进度，要本人在对话里明确同意才做。
 
-**自动提炼（macOS，Codex 与 Claude Code）。** 插件给两个 Agent 各带一份 hook 配置（`hooks/codex.json`、`hooks/claude.json`，各只被自己的 Agent 加载），共用 `hooks/auto-extract.sh <agent> <事件>`：会话开始、每轮结束、会话结束时只读组件的通道描述文件、问组件一次。组件正在采集调用它的这个 Agent 的会话（描述文件里的来源格式与它一致；Claude Code 的 hook 不替 Codex 整理，反过来也一样）、有待提炼，且最早一条已等 30 分钟以上（或本会话结束）时，hook 在后台另起一轮：Codex 用 `codex exec --ephemeral --ignore-user-config`，Claude Code 用 `claude -p --no-session-persistence --safe-mode`（在一个空的临时目录里、清空环境运行）；两种都不留会话文件，也不加载本人的配置、MCP 和插件 hook。Codex 那一轮只能读组件目录；Claude Code 那一轮读不到主目录、临时目录和外接卷，只放行组件目录和本轮临时目录；两种都写不了组件目录，网络只到 127.0.0.1；每轮最多 5 批、每批 20 条，交回后结束，不打扰当前对话。同一时间只跑一轮。时间、条数和用量记在组件里，窗口「详细信息」可看可关；关闭后回到手动调用。Codex 首次安装插件、以及之后插件更新改动 hook 时，要在 Codex 里审核并信任一次。Windows、Grok 仍用上面的手动调用。
+本机 World Capture 组件显示“待提炼”时，可在对应 Agent 中显式调用 `world-source-extract`（Codex `$world-source-extract`，Claude Code `/world:world-source-extract`，pi `/skill:world-source-extract`）。Agent 只处理自己格式的条目，经本机通道交回 null 或有限结果，组件用自己的连接送出；Agent 全部关闭时保持待提炼并显示覆盖缺口。
+
+**自动提炼（macOS，Codex、Claude Code 与 pi）。** 插件给 Codex 和 Claude Code 各带一份 hook 配置（`hooks/codex.json`、`hooks/claude.json`，各只被自己的 Agent 加载），给 pi 带一个扩展 `hooks/pi.ts`（要本人装，见下），三者共用 `hooks/auto-extract.sh <agent> <事件>`：会话开始、每轮结束、会话结束时只读组件的通道描述文件、问组件一次。组件正在采集调用它的这个 Agent 的会话（描述文件里的来源格式与它一致；Claude Code 的 hook 不替 Codex 或 pi 整理，反过来也一样）、有待提炼，且最早一条已等 30 分钟以上（或本会话结束）时，hook 在后台另起一轮：Codex 用 `codex exec --ephemeral --ignore-user-config`，Claude Code 用 `claude -p --no-session-persistence --safe-mode`，pi 用 `pi -p --no-session -ne`（这两种都在一个空的临时目录里、清空环境运行）；三种都不留会话文件，也不加载本人的配置、MCP 和插件 hook（pi 不加载本人的扩展、技能和提示词模板）。Codex 那一轮只能读组件目录；Claude Code 和 pi 那一轮读不到主目录、临时目录和外接卷，只放行组件目录和本轮临时目录；pi 没有内置沙箱，那一轮只有随包的整理轮扩展 `hooks/pi-round.ts` 注册的一个工具 `world_channel_curl`（内置 bash 不注册），它只放行访问组件通道的单行 `curl`，每条命令去掉代理变量、放进 macOS 的 `sandbox-exec`，网络只到通道那一个端口；三种都写不了组件目录，网络只到 127.0.0.1；每轮最多 5 批、每批 20 条，交回后结束，不打扰当前对话。同一时间只跑一轮。时间、条数和用量记在组件里，窗口「详细信息」可看可关；关闭后回到手动调用。Codex 首次安装插件、以及之后插件更新改动 hook 时，要在 Codex 里审核并信任一次。Windows、Grok，以及没装扩展的 pi，仍用上面的手动调用。
+
+**在 pi 里装整理技能。** pi 从 `~/.pi/agent/skills/<名>/SKILL.md` 发现技能。把克隆下来的公开仓库 world-plugin 里的 `world/skills/world-source-extract` 链接过去，以后在仓库里拉新版就跟着更新，不用再装：
+
+- macOS：`mkdir -p ~/.pi/agent/skills && ln -s "<world-plugin 仓库>/world/skills/world-source-extract" ~/.pi/agent/skills/world-source-extract`
+- Windows PowerShell：`New-Item -ItemType Directory -Force "$HOME\.pi\agent\skills" | Out-Null; New-Item -ItemType Junction -Path "$HOME\.pi\agent\skills\world-source-extract" -Target "<world-plugin 仓库>\world\skills\world-source-extract"`
+
+要 pi 也在后台自动整理（只限 macOS），再把扩展链接进 pi 的扩展目录；装了才有后台轮，没装就仍是手动调用。扩展按链接指向的真实位置找同目录的脚本，所以要链接，不要复制：
+
+- macOS：`mkdir -p ~/.pi/agent/extensions && ln -s "<world-plugin 仓库>/world/hooks/pi.ts" ~/.pi/agent/extensions/world-auto-extract.ts`
 
 清单校验、隔离的真实 MCP 协议测试与成员在干净客户端完成安装登录是不同检查。各参考客户端及系统组合的实际安装、登录、来源覆盖与跨端连续性由验收记录确认，不能从包格式校验推定通过。
 
