@@ -1,6 +1,6 @@
 # world-capture 插件
 
-工程包版本：0.1.6。本机采集：Claude Code、Codex 的会话每轮结束时，钩子只读这个会话新增的记录，把条目放进本机队列；攒够了在后台起一轮只带 world 工具的 Agent 判断，再经 world 插件的连接送进 world。要和 `world` 插件一起装：后台那一轮用它的连接（和它的登录），判断规则取它的 `world-source-extract` 技能。
+工程包版本：0.1.7。本机采集：Claude Code、Codex 的会话每轮结束时，钩子只读这个会话新增的记录，把条目放进本机队列；攒够了在后台起一轮只带 world 工具的 Agent 判断，再经 world 插件的连接送进 world。要和 `world` 插件一起装：后台那一轮用它的连接（和它的登录），判断规则取它的 `world-source-extract` 技能。
 
 拆成单独的插件，是因为 Codex 在插件里任何一个文件变了以后都要本人重新信任一次钩子；`world` 经常发版，采集逻辑很少变。
 
@@ -143,7 +143,7 @@ capture.ps1 export <claude|codex> [选择记录文件 读回记录文件]
 
 一轮在读增量的那个脱离进程里跑，先建 `round.lock/`（Mac 上 `mkdir`，Windows 上 `New-Item -ItemType Directory`，要么建成、要么失败）。锁比硬时限再老 10 分钟，就当持锁的进程已经不在了，挪开重来。
 
-每次模型调用是一次单独的 `claude -p` 或 `codex exec`，提示词从标准输入交，工作目录是空的 `work/`，环境只带 `HOME`、用户名、系统 `PATH` 加程序所在目录（Windows 上再接上钩子环境的 `PATH`：npm 装的 `codex.cmd` 要找 node，node 不在同一个目录）、`LANG`、临时目录、`CLAUDE_CONFIG_DIR` 或 `CODEX_HOME`（设了才带），以及 `WORLD_AUTO_EXTRACT_ROUND=<round_id>`：后台轮加载的 world 插件的钩子靠它一进来就退出。三种调用各自只放行这几个 world 工具：
+每次模型调用是一次单独的 `claude -p` 或 `codex exec`，提示词从标准输入交，工作目录是空的 `work/`，环境只带 `HOME`、用户名、系统 `PATH` 加程序所在目录（Windows 上再接上钩子环境的 `PATH`：npm 装的 `codex.cmd` 要找 node，node 不在同一个目录）、`LANG`、临时目录、`CLAUDE_CONFIG_DIR` 或 `CODEX_HOME`（设了才带），以及 `WORLD_AUTO_EXTRACT_ROUND=<round_id>`：后台轮加载的 world 插件的钩子靠它一进来就退出。claude 另带 `ENABLE_CLAUDEAI_MCP_SERVERS=false`：账号上的 claude.ai 连接器连上后，claude 会把它们的工具定义补发进下一次请求（本机实测约 12 万 token），`--setting-sources`、`--tools`、`--disallowedTools` 都拦不住，这个变量把它们关掉（0.1.7 起）。三种调用各自只放行这几个 world 工具：
 
 | 调用 | 工具 | 做什么 |
 | --- | --- | --- |

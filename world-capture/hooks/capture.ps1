@@ -1756,6 +1756,9 @@ function Set-ChildEnvironment($psi) {
   $psi.EnvironmentVariables['TEMP'] = $script:CliTemp
   $psi.EnvironmentVariables['TMP'] = $script:CliTemp
   $psi.EnvironmentVariables['WORLD_AUTO_EXTRACT_ROUND'] = $script:RoundId
+  # 账号上的 claude.ai 连接器连上后，claude 会在下一次请求里补发它们的工具定义（Mac 上实测约 12 万 token），
+  # --setting-sources、--tools、--disallowedTools 都拦不住。后台轮只用 world 插件的连接，把它们关掉。
+  if ($script:Agent -ceq 'claude') { $psi.EnvironmentVariables['ENABLE_CLAUDEAI_MCP_SERVERS'] = 'false' }
 }
 
 # 起一次 CLI，最多等 $limit 秒，到点连同子进程一起结束（taskkill /T）。返回退出码、是否超时和两路输出。

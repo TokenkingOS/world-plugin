@@ -390,6 +390,9 @@ call() {
     LANG="${LANG:-en_US.UTF-8}" TMPDIR="$work/tmp" WORLD_AUTO_EXTRACT_ROUND="$round_id"
   if [ "$agent" = claude ]; then
     [ -n "${CLAUDE_CONFIG_DIR:-}" ] && set -- "$@" CLAUDE_CONFIG_DIR="$CLAUDE_CONFIG_DIR"
+    # 账号上的 claude.ai 连接器连上后，claude 会在下一次请求里补发它们的工具定义（本机实测约 12 万 token），
+    # --setting-sources、--tools、--disallowedTools 都拦不住。后台轮只用 world 插件的连接，把它们关掉。
+    set -- "$@" ENABLE_CLAUDEAI_MCP_SERVERS=false
     tools=$(jqc -n -r --arg kind "$kind" 'include "round"; TOOLS[$kind] | map(CLAUDE_PREFIX + .) | join(",")')
     hidden=
     [ -f "$home/world-tools.json" ] && hidden=$(jqc -r --arg kind "$kind" 'include "round"; hidden_tools($kind)' "$home/world-tools.json" 2>/dev/null)
