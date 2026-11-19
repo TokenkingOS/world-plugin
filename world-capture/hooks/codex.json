@@ -6,8 +6,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh \"${PLUGIN_ROOT}/hooks/capture.sh\" codex SessionStart",
-            "commandWindows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"${PLUGIN_ROOT}/hooks/capture.ps1\" codex SessionStart",
+            "command": "sh \"${PLUGIN_ROOT}/bin/run.sh\" codex SessionStart",
+            "commandWindows": "& \"${PLUGIN_ROOT}/bin/capture-windows-$(if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'amd64' }).exe\" codex SessionStart",
             "timeout": 10
           }
         ]
@@ -19,8 +19,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh \"${PLUGIN_ROOT}/hooks/capture.sh\" codex Stop",
-            "commandWindows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"${PLUGIN_ROOT}/hooks/capture.ps1\" codex Stop",
+            "command": "sh \"${PLUGIN_ROOT}/bin/run.sh\" codex Stop",
+            "commandWindows": "& \"${PLUGIN_ROOT}/bin/capture-windows-$(if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'amd64' }).exe\" codex Stop",
             "timeout": 10
           }
         ]
@@ -32,8 +32,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh \"${PLUGIN_ROOT}/hooks/capture.sh\" codex SessionEnd",
-            "commandWindows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"${PLUGIN_ROOT}/hooks/capture.ps1\" codex SessionEnd",
+            "command": "sh \"${PLUGIN_ROOT}/bin/run.sh\" codex SessionEnd",
+            "commandWindows": "& \"${PLUGIN_ROOT}/bin/capture-windows-$(if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'amd64' }).exe\" codex SessionEnd",
             "timeout": 10
           }
         ]

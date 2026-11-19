@@ -5,19 +5,21 @@ description: 本人在对话里说「开始采集 world 进展」、要让本机
 
 本机采集由 world-capture 插件的钩子做：每轮结束读这个会话新增的记录，在后台起一轮只带 world 工具的判断，经本插件的连接送出。本技能只做开头那一步：在对话里确认读哪个文件夹、从何时起、送到哪、记到哪，确认后把选择写进本机 `~/.tkos-world/capture/config.json`（Windows 是 `%USERPROFILE%\.tkos-world\capture\config.json`）。没有它，钩子什么都不做。每种 Agent、每台设备一项选择：在 Claude Code 里办的是 Claude Code 的，在 Codex 里办的是 Codex 的，不替另一种 Agent 建。
 
-## 调用 world-capture 的脚本
+## 调用 world-capture 的启动程序
 
 先找到已装的 world-capture 插件目录：
 
 - Claude Code：读 `$CLAUDE_CONFIG_DIR/plugins/installed_plugins.json`（没设这个变量就是 `~/.claude/plugins/installed_plugins.json`），取 `world-capture@tkos-world` 的 `installPath`，有用户级（`scope` 为 `user`）的取它。
 - Codex：`$CODEX_HOME/plugins/cache/tkos-world/world-capture/` 下（没设就是 `~/.codex/...`）版本号最大的那个目录。
 
-找不到就告诉本人先装 world-capture 插件（市场 README 里的「本机采集」一节），然后停下。脚本在插件目录的 `hooks/` 里，`<Agent>` 是 `claude` 或 `codex`，按你自己是哪种 Agent 填：
+找不到就告诉本人先装 world-capture 插件（市场 README 里的「本机采集」一节），然后停下。启动程序经插件目录 `bin/` 里的包装调，`<Agent>` 是 `claude` 或 `codex`，按你自己是哪种 Agent 填：
 
 ```sh
-sh "<插件目录>/hooks/capture.sh" <命令> <Agent> [文件]                                                   # macOS
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "<插件目录>\hooks\capture.ps1" <命令> <Agent> [文件]   # Windows
+sh "<插件目录>/bin/run.sh" <命令> <Agent> [文件]                                                   # macOS
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "<插件目录>\bin\run.ps1" <命令> <Agent> [文件]   # Windows
 ```
+
+插件目录里没有 `bin/`（world-capture 0.1.7 及以前），就调 `hooks/` 里的 `capture.sh`（Windows 是 `capture.ps1`），参数和返回都一样。
 
 每次在标准输出上交回一行 JSON。`enable`、`import` 拒绝时退出码是 1，交回 `{"ok":false,"reason":"…"}`。Codex 的沙箱可能不让写主目录，按 Codex 的提示批准这一条命令。
 
@@ -27,7 +29,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "<插件目录>\hooks\ca
 
 运行 `check <Agent>`：
 
-- `supported` 为 false：照实告诉本人这台机器不支持采集和原因（例如 `macos_too_old` 是 macOS 低于 15，`jq_missing` 是没有 `/usr/bin/jq`），不准备、不建选择，停下。
+- `supported` 为 false：照实告诉本人这台机器不支持采集和原因（例如 `macos_too_old` 是 macOS 低于 15；0.1.7 及以前还会报 `jq_missing`，是没有 `/usr/bin/jq`），不准备、不建选择，停下。
 - `capturing` 不为 null：这种 Agent 已经在采集，说明从 `history_from` 起在采，停下。本人要改记到的目标，就按下面重新走一遍；新选择会替换本机的旧一项，`enable` 交回 `replaced` 是被换掉的那项，问本人后再用 `world_app_sources_revoke` 撤掉它。
 - `component` 不为 null、它的 `source_format` 等于 `format` 并且有 `selection_id`：这台机器上的 World Capture 组件建过这种会话的选择，走下面的「迁移」，不新建选择。
 - `component` 的 `running` 为 true（组件正在采集）：告诉本人，组件在采集期间插件只排队、不在后台送，避免两边送同一条；组件停下、退出以后插件才开始送。本人说组件早就退出了、`running` 却一直是 true，多半是组件上次没正常退出，留下了采集标记：请本人打开组件一次（它启动时会清掉残留的标记），停止采集后从菜单退出，再重新 `check`。不要自己去删组件目录里的文件。
@@ -93,3 +95,14 @@ Codex：
 6. 组件里断开账号、卸载组件由本人另定，不在这一步做。
 
 `import` 拒绝时：`component_capture_enabled`、`component_running` 是组件还开着采集或还在运行，回到第 2 步；`selection_mismatch`、`confirmation_mismatch` 是读回的不是组件那项窗口确认的选择；`device_mismatch` 是本机已用另一个设备 id 建过选择，停下交维护方。
+
+## 服务忙
+
+world 工具返回 `SERVICE_BUSY`（503，服务忙，什么都没提交，带 `retry_after_seconds`）时，先等够这些秒，再按下面原样重试；仍忙就按新给的秒数再等，最多三轮，之后停在这一步，留着已拿到的 `request` 和本人的确认原话（有的话），如实告诉本人服务忙。
+
+- 读（`world_get_connection`、`world_list_objects`、`world_get_object`、`world_app_sources_list`、`world_app_sources_targets`、`world_app_get_task`、`world_app_sources_read`）原样重读。
+- `world_app_sources_prepare` 本身不写任何东西。本人还没确认时原样重新准备；已经确认了就不要重新准备，新 `request` 的 digest 不同，原确认对不上。
+- `world_app_sources_select` 用原样的 `request` 和 `confirmation`（`confirmed_at` 也不改）再调：同一请求已建好的只交回那一项，不会另建。
+- `world_app_sources_revoke` 先用 `world_app_sources_read` 读回那一项，已撤销就照实说；还生效就用读到的版本再调。
+
+`EVIDENCE_UNAVAILABLE`（证据存储或数据库不可用）不是忙，没有等多久的说法，如实告诉本人，不连续重试。

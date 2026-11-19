@@ -29,7 +29,8 @@ description: 用 world 回答经营问题、查对象和事件。用户问到公
 - 用户给了对象 id，直接用。
 - 给了天枢编号（例如 `mission:xxx`、`capability:05`）：`world_list_objects`，`external_system` 为 `tianshu`，`external_id` 为编号。
 - 给了名字：`world_list_objects` 按 `type`（`Company`、`Strategy`、`ResponsibilityUnit`、`LongTermGoal`、`PeriodGoal`、`Mission`、`Task`、`Activity`）和 `period`（本月 `YYYY-MM`）筛，再比对标题。多个都像时，列出候选请用户选，不要猜。
-- 说「我的」：先用 `world_get_connection` 确定本人的主体。再对候选逐个 `world_get_object`，看 `identity` 里的责任人。
+- 说「我的」：先用 `world_get_connection` 确定本人的主体。再对候选逐个 `world_get_object`，看 `identity` 里的责任人。核不到本人时照 `world-connect` 的「没核到身份时」答，不列对象。回答「谁负责」写责任人的名字，核到是本人才说「你负责」。
+- 用户拿分享页、截图、转来的文字来问：照 `world-connect` 的「没核到身份时」讲，标明是谁、什么时候查的。
 - 列对象只返回对象头（标题、类型、版本、生命周期、域），要内容再取对象或取上下文。
 
 ## 查事件

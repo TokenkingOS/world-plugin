@@ -9,6 +9,7 @@ check() 交回：
 - selections：要在 world 里核的来源选择。本机 config.json 里每种 Agent 合用的一项；一项都没有时（还在用 World Capture
   组件，或这台机器不采集），退回 daily.json 的 capture_switch.selection_id。
 - rounds：每种 Agent 这一天起了几轮后台轮、成功几轮、失败几轮，现在队列里积压几条。
+- 每周复核（audits/）最近 8 天里最新的那一份和没在跑，也作为 findings 报。
 - findings：要报给本人的问题，每项有 code 和照着报的 text。
 """
 from __future__ import annotations
@@ -22,6 +23,9 @@ from typing import Any, Callable, Optional
 FORMATS = {"claude": "claude-session-jsonl/1", "codex": "codex-rollout-jsonl/1"}
 NAMES = {"claude": "Claude Code", "codex": "Codex"}
 STALE = timedelta(hours=24)  # 队列里等了这么久还没送走，算没补上
+AUDIT_EVERY = timedelta(days=7)  # 每周复核：离上一份做完满 7 天才跑
+AUDIT_GAP = timedelta(days=8)  # 多留一天：这么久里一份做完的都没有，算没在跑
+AUDIT_KINDS = {"screened": "被规则挡下的", "null": "判成 null 的"}
 SEND_MISMATCHES = ("copy_mismatch", "unknown_import")  # rounds/ 里送出那一步记的、本机对不上 world 的导入
 _UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 _SOURCE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+~-]{0,199}")
@@ -34,6 +38,8 @@ FAILURES = {
     "network": ("网络不通", "网络恢复后下一轮自动重试"),
     "other": ("其他（{detail}）", "看本机 rounds/ 里这几轮的 calls"),
 }
+# 登录类失败：最近一轮是这两类的，下一轮照旧隔 30 分钟、不翻倍（启动程序的 gate，本人 2026-11-19 定）。
+LOGIN_FAILURES = ("login_invalid", "world_unavailable")
 # 钩子写进 unsupported.json 的原因（sh 版与 PowerShell 版）。
 UNSUPPORTED = {
     "macos_too_old": "macOS 低于 15（本机采集只支持 15 及以上）",
@@ -86,6 +92,23 @@ def _records(folder: Path, pattern: str) -> list[dict]:
     found = []
     for path in sorted(folder.glob(pattern)) if folder.is_dir() else []:
         value = _optional(path)
+        if isinstance(value, dict):
+            found.append(value)
+    return found
+
+
+def _lines(path: Path) -> list[dict]:
+    """JSONL 文件里每一行读得出的 JSON 对象；读不出的行、读不了的文件跳过。"""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    found = []
+    for line in text.splitlines():
+        try:
+            value = json.loads(line)
+        except ValueError:
+            continue
         if isinstance(value, dict):
             found.append(value)
     return found
@@ -175,6 +198,27 @@ def _rounds(home: Path, agent: str, clock: _Clock, now: datetime) -> tuple[Optio
                          "text": f"{name} 今天有 {len(sent)} 处本机对不上 world 的导入，涉及 {items} 条：模型交给 world 的和本机算好的"
                                  f"骨架不一致、world 照收了的 {counts['copy_mismatch']} 处，送了这一批里没有的条目的 "
                                  f"{counts['unknown_import']} 处。要维护方对着本机 rounds/ 里这几轮核。"})
+    # 判断的回复读不出的批（rounds/ 里 failed_batches）：这一轮的 failure 仍是 null，不算后台轮失败，另报。
+    broken = [[batch for batch in record["failed_batches"] if isinstance(batch, dict)]
+              for record in today if isinstance(record.get("failed_batches"), list)]
+    broken = [batches for batches in broken if batches]
+    if broken:
+        count = sum(len(batches) for batches in broken)
+        items = len({str(item) for batches in broken for batch in batches
+                     if isinstance(listed := batch.get("items"), list) for item in listed})
+        findings.append({"code": "batch_failed", "agent": agent, "rounds": len(broken), "batches": count, "items": items,
+                         "text": f"{name} 今天有 {len(broken)} 轮后台轮里共 {count} 批判断的回复读不出，涉及 {items} 条：这几批的判断没落盘，"
+                                 "条目留在本机队列再判；再答坏就逐条单独判，单独判满 3 次按 null 落盘（另报 judge_failed）。"
+                                 "两轮的间隔按失败加倍。要维护方对着本机 rounds/ 里这几轮的 failed_batches 核。"})
+    # 单独判满 3 次仍没判成、按 null 落盘的候选（delivered/ 里 status dropped、code judge_failed）：没经过判断就出了队列。
+    gave_up = {(row.get("item_id"), row.get("item_version"))
+               for row in _lines(home / "delivered" / f"{FORMATS[agent]}.jsonl")
+               if row.get("status") == "dropped" and row.get("code") == "judge_failed"
+               and (moment := _time(row.get("at"))) and clock.today(moment)}
+    if gave_up:
+        findings.append({"code": "judge_failed", "agent": agent, "items": len(gave_up),
+                         "text": f"{name} 今天有 {len(gave_up)} 条候选单独判了 3 次都没判成，已按 null 落盘（judge_failed），"
+                                 "没经过判断就出了队列，不会再判。要维护方对着本机 delivered/ 和 rounds/ 核是哪几条、为什么判不成。"})
     streak = []
     for record in reversed(records):
         if not record.get("failure"):
@@ -184,11 +228,17 @@ def _rounds(home: Path, agent: str, clock: _Clock, now: datetime) -> tuple[Optio
         since, last = _time(streak[0]["started_at"]), _time(streak[-1]["started_at"])
         classes, labels, hints = _classes(streak, agent)
         earlier = since < clock.start
+        latest = streak[-1]["failure"] if isinstance(streak[-1]["failure"], dict) else {}
+        recovers = "登录好以后半小时内自动恢复。" if latest.get("class") in LOGIN_FAILURES else ""
+        # 下一轮最早几点：启动程序写这一轮记录时按同一条间隔规则算好的（next_round_at），这里不另算；旧记录没有就不报。
+        upcoming = _time(streak[-1].get("next_round_at"))
         findings.append({"code": "round_failing", "agent": agent, "failing": len(streak), "since": _utc(since), "last": _utc(last),
                          "classes": classes, "queued": len(queue), "earlier": earlier,
+                         "next_round_at": _utc(upcoming) if upcoming else None,
                          "text": f"{name} 的后台轮连续失败 {len(streak)} 轮（{clock.span(since, last)}{'，此前已报' if earlier else ''}）："
                                  f"{labels}。"
-                                 f"待提炼积压 {len(queue)} 条，都留在本机队列，下一轮成功时补送。处理：{hints}。"})
+                                 f"待提炼积压 {len(queue)} 条，都留在本机队列，下一轮成功时补送。处理：{hints}。{recovers}"
+                                 + (f"下一轮最早 {clock.show(upcoming)}。" if upcoming else "")})
     elif failed_today:
         first, last = _time(failed_today[0]["started_at"]), _time(failed_today[-1]["started_at"])
         classes, labels, _ = _classes(failed_today, agent)
@@ -203,6 +253,69 @@ def _rounds(home: Path, agent: str, clock: _Clock, now: datetime) -> tuple[Optio
                          "text": f"{name} 的待提炼队列里最早一条（{clock.show(oldest)} 入队）已等了 {hours} 小时，超过 24 小时还没送走；"
                                  f"现在积压 {len(queue)} 条。"})
     return summary, findings
+
+
+def _count(value: Any) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _started(entry: dict) -> Optional[datetime]:
+    """这种 Agent 开始采集的时刻：config 那一项的 confirmed_at（本人在对话里确认的那一刻）；读不出时退回 history_from。
+    history_from 可以往前补历史，比开始采集早，所以不先用它。"""
+    return _time(entry.get("confirmed_at")) or _time(entry.get("history_from"))
+
+
+def _prepared(home: Path, agent: str, now: datetime, due: Optional[datetime]) -> bool:
+    """最近 8 天里、又在复核该做（due：上一份复核做完满 7 天的时刻，没做过是 None）以后，这种 Agent 有没有带准备调用的
+    后台轮（rounds/ 里 calls 有 kind 为 prepare 的）。没有的，它没有要判的候选，或者那几轮离上一份复核不满 7 天本来就不该复核；
+    复核挂在准备成功的轮末尾，也就起不了。"""
+    for record in _records(home / "rounds", "*.json"):
+        started, calls = _time(record.get("started_at")), record.get("calls")
+        if (record.get("agent") == agent and record.get("format") == FORMATS[agent] and started and now - started <= AUDIT_GAP
+                and (due is None or started >= due)
+                and isinstance(calls, list) and any(isinstance(call, dict) and call.get("kind") == "prepare" for call in calls)):
+            return True
+    return False
+
+
+def _audits(home: Path, agent: str, started: Optional[datetime], clock: _Clock, now: datetime) -> list[dict]:
+    """每周复核（audits/<格式>/）：最近 8 天里最新的那一份，报复核了几条、分歧几条，查漏那天之前做完的注明此前已报
+    （日进展在固定时刻跑，晚于那个时刻或电脑睡过点那天做完的，要在之后报）。一份都没有、开始采集（started）满 8 天、
+    最近 8 天里又有带准备调用的轮，报 audit_missing。没在采集的 started 是 None。"""
+    folder = home / "audits" / FORMATS[agent]
+    done = []
+    for path in sorted(folder.glob("*.json")) if folder.is_dir() else []:
+        value = _optional(path)
+        if isinstance(value, dict) and value.get("format") == FORMATS[agent] and (finished := _time(value.get("finished_at"))):
+            done.append((finished, path, value))
+    name, findings = NAMES[agent], []
+    latest = max(done, key=lambda entry: entry[0], default=None)
+    if latest and now - latest[0] <= AUDIT_GAP:
+        finished, path, value = latest
+        earlier, partial = finished < clock.start, value.get("partial") is True
+        counts = {kind: value[kind] if isinstance(value.get(kind), dict) else {} for kind in AUDIT_KINDS}
+        total = {key: sum(_count(counts[kind].get(key)) for kind in AUDIT_KINDS)
+                 for key in ("unreadable", "unanswered", "invalid", "failed")}
+        sampled = {kind: _count(counts[kind].get("sampled")) for kind in AUDIT_KINDS}
+        listed = value.get("disagreements") if isinstance(value.get("disagreements"), list) else []
+        disagreements = {kind: sum(1 for item in listed if isinstance(item, dict) and item.get("kind") == kind) for kind in AUDIT_KINDS}
+        unanswered = f"、漏判的 {total['unanswered']} 条" if total["unanswered"] else ""
+        invalid = f"、交回的结果不合格的 {total['invalid']} 条" if total["invalid"] else ""
+        when = f"{clock.show(finished)} {'结束，时间不够没判完' if partial else '做完'}{'，此前已报' if earlier else ''}"
+        findings.append({"code": "audit", "agent": agent, "finished_at": _utc(finished), "earlier": earlier, "partial": partial,
+                         "sampled": sampled, "disagreements": disagreements, **total, "file": str(path),
+                         "text": f"{name} 的每周复核（{when}）复核了 {sum(sampled.values())} 条："
+                                 + "、".join(f"{label} {sampled[kind]} 条" for kind, label in AUDIT_KINDS.items())
+                                 + f"。其中复核认为该记的分歧 {sum(disagreements.values())} 条（"
+                                 + "、".join(f"{label} {disagreements[kind]} 条" for kind, label in AUDIT_KINDS.items())
+                                 + "），不会自动写进 world，要本人逐条看；"
+                                 f"原文读不到、没抽的 {total['unreadable']} 条，没判成的 {total['failed']} 批{unanswered}{invalid}。"
+                                 f"分歧列在 {path}。"})
+    elif started and now - started >= AUDIT_GAP and _prepared(home, agent, now, latest[0] + AUDIT_EVERY if latest else None):
+        findings.append({"code": "audit_missing", "agent": agent,
+                         "text": f"{name} 最近 8 天里没有做完的每周复核（抽查判断漏没漏）：复核挂在后台轮末尾，这一轮准备成功、"
+                                 "离上一次复核满 7 天、剩下的时间够才跑。要维护方对着本机 rounds/ 里各轮的 audit 和 calls 核。"})
+    return findings
 
 
 def _session_files(agent: str, folder: Path, day: date) -> list[Path]:
@@ -282,6 +395,8 @@ def check(home: Path, day: date, tz: tzinfo, now: datetime, switch_selection_id:
     for agent, (status, entry) in entries.items():
         if status == "capturing":
             findings += _hook(home, agent, entry, clock, has_work)
+    for agent, (status, entry) in entries.items():
+        findings += _audits(home, agent, _started(entry) if status == "capturing" else None, clock, now)
     paused = _optional(home / "paused.json")
     if isinstance(paused, dict):
         reason = str(paused.get("reason") or "")

@@ -34,6 +34,10 @@
 
 Codex 每次启动都会更新市场和已装的插件，不用另外设置。插件更新改动了 hook 时，新的 hook 要你再用一次 `/hooks` 信任后才会运行。
 
+## world 调用会记进 Langfuse
+
+你经 `world` 插件调用 world 时，每次调用的参数和返回（含正文，凭证先抹掉）会记进维护方自建的 Langfuse，只用来排障和评估写入质量，满 30 天整条删除（2026-12-11 起，挑出来做评测的少量样本除外）。记什么、不记什么、谁能看，见 world 插件说明里的「[world 调用会记进 Langfuse](world/README.md#world-调用会记进-langfuse)」。
+
 ## 本机采集（world-capture）
 
 `world-capture` 是第二个插件：会话每轮结束时读这个会话新增的记录，攒够了在后台起一轮只带 world 工具的 Agent，判断后经 `world` 插件的连接送进 world。先按上面装好 `world` 并登录，再装它：
@@ -46,6 +50,8 @@ codex plugin add world-capture@tkos-world        # Codex
 Codex 装好后第一次开会话会弹「Hooks need review」，选信任；之后 `world-capture` 每次更新也会弹一次，不信任就不采集。
 
 装好以后对 Agent 说「开始采集 world 进展」。它先核这台机器能不能采（Mac 要 macOS 15 及以上），再列出读哪个文件夹、从什么时候起、送到哪个公司、记到哪些 Task 和 Mission，你在对话里明确同意后才开始。Claude Code 和 Codex 各说一次，各是一项。从确认的时刻起采，之前的会话不补。
+
+`world-capture` 送进 world 的条目经 `world` 插件的连接调用，同样按上面那一节记进 Langfuse。它的后台轮只用来源工具，所以参数和返回只记编号、状态、版本和时刻，原文留在本机。
 
 以前用过 World Capture 组件的，在 Claude Code 里说「开始采集 world 进展」时，Agent 会请你先在组件里停止采集并退出，再问你是否同意把组件的采集迁到插件；迁过来以后组件已送出的不会再送一遍。
 

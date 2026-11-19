@@ -35,19 +35,19 @@ curl -sS -H "@<header_file>" "<base_url>/v1/pending?format=<source_format>&limit
 - **该记的**：能对上目标 `criteria` 里某一条（验收标准、结果、里程碑、Task / Activity 全景条目），或者改变了它的状态（完成、受阻、偏离）的结果。`value` 以 `【<criteria id>】` 开头，后面写一句结论，再写依据的性质（实测、对方报告、推断）。一段原文同时涉及几条 criteria 时，选改变最直接的一条开头。
 - **一律交 null 的中间步骤**：PR 开了或合并了、组件或插件装了、换了版本号、写了草稿或 ADR、给同事发了文档或消息、结构重构、跑了测试、讨论和计划本身、关于提炼本身的对话。只有它直接改变了某条 criteria 的状态才算，例如「真实 Case 的确认、事件、读回第一次对上」。
 - **对照**：目标有 criteria `ac-2`「真实 Case 全链路读回一致」。原文「今天 10:20 拿真实 Case 走了一遍，确认、事件、读回第一次对上了」，交 `value: "【ac-2】真实 Case 的确认、事件、读回第一次对上（实测）"`，`occurred_at` 取 10:20。原文「PR 已合并，版本号升到 0.2.0」，没有说明任何一条 criteria 因此达成或受阻，交 null。目标有 criteria `ac-4`「条件未满足时明确缺口、影响与责任方」，原文「16:02 用合成数据重跑联测，对方产品对平常问题取不到 world 里的跨人依赖，已告知对方」：跑测试本身交 null，跑出的这个缺口对上了 ac-4，交 `value: "【ac-4】对方产品对平常问题取不到 world 里的跨人依赖（合成数据实测），已告知对方"`，`occurred_at` 取 16:02。
-- **去重**：同一批里说的是同一件事的，合成一条交在最能代表的那个条目上，其余交 null；本轮前几批里你自己已经交回的，也不再重复交。`recorded` 里已经有的事实，不论措辞怎样都交 null。`recorded` 为 null 表示没读到，这时只做上面的批内和本轮内去重。
-- **时间**：`occurred_at` 只用原文写明的、或可由原文相对时间按这条的 `reported_at` 换算的真实时刻。给不出就交 null，不用 `reported_at`、文件时间、现在顶替，也不留给本人补。
+- **去重**：同一批里说的是同一件事的，合成一条交在最能代表的那条候选上，其余交 null；本轮前几批里你自己已经交回的，也不再重复交。`recorded` 里已经有的事实，不论措辞怎样都交 null。`recorded` 为 null 表示没读到，这时只做上面的批内和本轮内去重。
+- **时间**：`occurred_at` 只用原文写明的、或可由原文相对时间按这条的 `reported_at` 换算的真实时刻。这条本身没写时刻时，可以取同一会话前后各三条以内写明的、说的是同一件事的钟点，按写明钟点那一条的 `reported_at` 换算，这时 `quote` 里要带上写明钟点的那句话。给不出就交 null，不用 `reported_at`、文件时间、现在顶替，也不留给本人补。
 - **目标**：`target_ref` 只用 `targets[].ref`，`field_key` 用同一项的 `field_key`。对不上任何目标就交 null，不要省略 `target_ref` 留给本人归位。返回了条目而 `targets` 为空时，不交回任何结果，告诉本人组件读不到目标；交 null 会把条目永久判成无增量。组件读不到本人所选的目标时，`/v1/pending` 返回 503 `target_unavailable`，按上面的 503 停止。
 - **被拒绝时**：收到 `occurred_at_missing`、`target_not_selected`、`criterion_unlinked`，同一个 item 改交 null，或按提示修正后重交一次；不换 `item_id`、`item_version`。
 
-## 逐条提炼
+## 按会话提炼
 
-每条只能交回两种结果之一：
+条目按会话分组、按时间排。要判的条目叫候选，其余条目是前后文，只供阅读，不交结果。判断一条候选时，连同同一会话里它前后的条目一起读。结论常常要看前一条本人的话或后一条答复才说得清，时刻也常写在相邻的条目里。每条候选只能交回两种结果之一：
 
 - `null`：已检查，没有需要进入 world 的业务增量。
 - 有限 SourceItem，只含 `classification`（fact/decision/suggestion/question/unknown）、`target_ref`、`field_key`、`value`、`quote`、`occurred_at`、`links`、`source_event_ref`、`constraint`。
 
-沿用 world-sources 的必要增量规则：`quote` 不超过 2000 字符，只是必要短依据；`value` 不超过 4000 字符或不超过 50 个短字符串。不传整段聊天、多轮对话、工具输出、完整提示、凭据或带凭据的链接、本机路径。`target_ref` 必须来自本轮实际读取、且已选入来源范围的 world Task@版本或 Mission@版本（只用 `targets[].ref`），对不上就交回 null，不猜。Mission 仅支持 world-sources 所述的普通进展事实位置。`occurred_at` 只用真实事实时点并带时区；不能用 reported_at、文件时间或现在顶替。原文用相对说法（今天、昨天、上午十点、刚才）时，以这条消息的 `reported_at` 为“当时”，在 `time_zone` 里换算成确切时刻：例如 reported_at 是本人时区 11 月 3 日下午，原文说“今天 10:20”，就是 11 月 3 日 10:20（本人时区）。原文没说时间，就交回 null。只知道“某 Agent 在某时报告了某事”时，value/quote 写明是未经独立核验的报告。来源里说“确认”不是本人对业务变更的批准。关于提炼本身的对话（处理待提炼、交回结果）交回 null。
+沿用 world-sources 的必要增量规则：`quote` 不超过 2000 字符，只是必要短依据；`value` 不超过 4000 字符或不超过 50 个短字符串。不传整段聊天、多轮对话、工具输出、完整提示、凭据或带凭据的链接、本机路径。`target_ref` 必须来自本轮实际读取、且已选入来源范围的 world Task@版本或 Mission@版本（只用 `targets[].ref`），对不上就交回 null，不猜。Mission 仅支持 world-sources 所述的普通进展事实位置。`occurred_at` 只用真实事实时点并带时区；不能用 reported_at、文件时间或现在顶替。原文用相对说法（今天、昨天、上午十点、刚才）时，以这条消息的 `reported_at` 为“当时”，在 `time_zone` 里换算成确切时刻：例如 reported_at 是本人时区 11 月 3 日下午，原文说“今天 10:20”，就是 11 月 3 日 10:20（本人时区）。候选本身没写时刻时，可以取同一会话前后各三条以内写明的、说的是同一件事的钟点，照上面的办法按写明钟点那一条的 `reported_at` 换算。这时 `quote` 里要带上写明钟点的那句话。还给不出，就交回 null。只知道“某 Agent 在某时报告了某事”时，value/quote 写明是未经独立核验的报告。来源里说“确认”不是本人对业务变更的批准。关于提炼本身的对话（处理待提炼、交回结果）交回 null。
 
 ## 交回并核对
 
@@ -66,3 +66,9 @@ Windows PowerShell 没有 heredoc，且管道可能改写中文编码：先用�
 交回后读 `GET <base_url>/v1/status`，每 3 秒一次，最多 20 次（约 1 分钟），直到 `submitted` 为 0。到上限仍不为 0，就停止轮询，如实告诉本人“组件尚未送出这些结果”，并说明组件窗口显示的状态；不要重交。再用 world 连接的 `world_app_sources_imports`（按 selection_id）和 `world_app_sources_result` 核对：`source_item_id`、`source_version` 与交回的 item_id/item_version 一致，并分别说明已交回、组件已送出、world 已接收、业务读回和待本人事项；没有读回就说未核实。`world_app_sources_runs` 里仍有 `extraction_pending` 时，如实说还有多少条待提炼。
 
 回复只写数量、结果和本人需要做的事，不贴原文、密钥或路径。所有 Agent 都关闭时组件保持待提炼并显示覆盖缺口，这不是“没有工作”。
+
+## 服务忙
+
+这里说的是核对时调的 world 工具，组件本机通道的 503（`authorization_unavailable`、`target_unavailable` 等）仍按上面停止；world 插件的后台自动整理轮没有 world 连接，不走这一节。
+
+`world_app_sources_imports`、`world_app_sources_result`、`world_app_sources_runs` 都只读，不写任何东西。返回 `SERVICE_BUSY`（503，服务忙，什么都没提交，带 `retry_after_seconds`）时，先等够这些秒，再用原参数原样重读；仍忙就按新给的秒数再等，最多三轮，之后停止核对，如实说明 world 服务忙。`EVIDENCE_UNAVAILABLE`（证据存储或数据库不可用）不是忙，没有等多久的说法，如实说明，不连续重试。两种情况都说读回未核实，已交回和组件已送出的照实分开说；这不是组件没送出，也不是 world 没接收，不要因此向组件重交。

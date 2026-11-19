@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"${CLAUDE_PLUGIN_ROOT}/hooks/capture.ps1\" claude SessionStart; sh \"${CLAUDE_PLUGIN_ROOT}/hooks/capture.sh\" claude SessionStart; exit 0",
+            "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"${CLAUDE_PLUGIN_ROOT}/bin/run.ps1\" claude SessionStart; sh \"${CLAUDE_PLUGIN_ROOT}/bin/run.sh\" claude SessionStart; exit 0",
             "timeout": 10
           }
         ]
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"${CLAUDE_PLUGIN_ROOT}/hooks/capture.ps1\" claude Stop; sh \"${CLAUDE_PLUGIN_ROOT}/hooks/capture.sh\" claude Stop; exit 0",
+            "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"${CLAUDE_PLUGIN_ROOT}/bin/run.ps1\" claude Stop; sh \"${CLAUDE_PLUGIN_ROOT}/bin/run.sh\" claude Stop; exit 0",
             "timeout": 10
           }
         ]
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"${CLAUDE_PLUGIN_ROOT}/hooks/capture.ps1\" claude SessionEnd; sh \"${CLAUDE_PLUGIN_ROOT}/hooks/capture.sh\" claude SessionEnd; exit 0",
+            "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"${CLAUDE_PLUGIN_ROOT}/bin/run.ps1\" claude SessionEnd; sh \"${CLAUDE_PLUGIN_ROOT}/bin/run.sh\" claude SessionEnd; exit 0",
             "timeout": 10
           }
         ]
